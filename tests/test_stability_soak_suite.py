@@ -155,6 +155,7 @@ def test_soak_suite_profile_thresholds_capture_long_run_evidence_limits() -> Non
     assert thresholds["max_cpu_percent"] == 70.0
     assert thresholds["max_pending_ping_count"] == 28
     assert thresholds["max_same_target_overlap"] == 1
+    assert thresholds["min_probe_starts_per_target"] == 13_824
     assert thresholds["max_cadence_grid_drift_seconds"] == 0.45
     assert thresholds["max_cadence_start_gap_seconds"] == 2.0
     assert thresholds["max_process_handle_growth"] == 256
@@ -319,12 +320,17 @@ def test_soak_suite_evidence_report_summarizes_thresholds_and_checks(tmp_path) -
     assert profile_report["thresholds"]["minimum_duration_seconds"] == 4.75
     assert profile_report["measurements"]["session_log_rows"] == 205
     assert profile_report["measurements"]["session_log_row_delta"] == 5
+    assert profile_report["measurements"]["probe_target_count"] == 50
+    assert profile_report["measurements"]["probe_min_starts_per_target"] == 1
     assert profile_report["measurements"]["cadence_max_abs_grid_drift_seconds"] == 0.05
     assert profile_report["measurements"]["max_same_target_overlap"] == 1
     assert profile_report["measurements"]["session_resume_verified"] is True
     assert profile_report["checks"]["evidence_schema_ok"] is True
     assert profile_report["checks"]["duration_ok"] is True
     assert profile_report["checks"]["pending_ping_ok"] is True
+    assert profile_report["checks"]["probe_target_coverage_ok"] is True
+    assert profile_report["checks"]["probe_min_starts_ok"] is True
+    assert profile_report["checks"]["probe_start_bounds_ok"] is True
     assert profile_report["checks"]["cadence_drift_ok"] is True
     assert profile_report["checks"]["cadence_gap_ok"] is True
     assert profile_report["checks"]["same_target_overlap_ok"] is True
@@ -616,7 +622,9 @@ def test_manual_stability_soak_workflow_is_manual_only() -> None:
     assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1" in text
     assert "--override-duration-seconds" in text
     assert "fixed-duration evidence profiles and cannot use an override" in text
-    assert "Cadence Drift" in text
+    assert "Due Lateness" in text
+    assert "Targets Probed" in text
+    assert "Min Starts" in text
     assert "Overlap" in text
     assert "Pending" in text
     assert "Handles Growth" in text
@@ -654,7 +662,7 @@ def _summary(
     rows = ping_results if session_log_rows is None else session_log_rows
     cadence_targets = max(round(int(profile_defaults["targets"]) * (1 - float(profile_defaults["timeout_ratio"]))), 1)
     return {
-        "evidence_schema_version": 2,
+        "evidence_schema_version": suite.EVIDENCE_SCHEMA_VERSION,
         "profile": profile,
         "platform": "posix",
         "targets": profile_defaults["targets"],
@@ -683,6 +691,9 @@ def _summary(
         "max_pending_ping_count": 0,
         "max_log_queue_depth": 1,
         "max_backoff_target_count": 1,
+        "probe_target_count": int(profile_defaults["targets"]),
+        "probe_min_starts_per_target": int(suite.profile_thresholds(profile)["min_probe_starts_per_target"]),
+        "probe_max_starts_per_target": expected_updates,
         "cadence_target_count": cadence_targets,
         "cadence_probe_starts": cadence_targets * expected_updates,
         "cadence_max_abs_grid_drift_seconds": 0.05,

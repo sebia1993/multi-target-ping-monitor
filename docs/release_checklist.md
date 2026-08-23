@@ -23,9 +23,10 @@ python scripts\verify_release.py
 - `runner_mode`: `github-hosted-windows`
 - `override_duration_seconds`: 비움
 
-`long4h`는 정확히 14,400초를 요청하며 축약할 수 없습니다. 결과 artifact의 schema v2 JSON에서 다음 항목이 모두 threshold를 통과해야 합니다.
+`long4h`는 정확히 14,400초를 요청하며 축약할 수 없습니다. 결과 artifact의 schema v3 JSON에서 다음 항목이 모두 threshold를 통과해야 합니다.
 
-- cadence grid drift와 시작 gap
+- due 대비 submit lateness와 실제 runner 시작 gap
+- 50개 전체 대상 coverage 및 대상별 최소 probe 시작 횟수
 - 동일 target 최대 overlap 1 이하
 - active/pending ping과 thread 수
 - memory와 Windows process handle 증가량

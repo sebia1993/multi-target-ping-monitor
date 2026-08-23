@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import sys
 import threading
 from argparse import Namespace
 from types import SimpleNamespace
@@ -7,12 +9,16 @@ from types import SimpleNamespace
 import pytest
 
 from app.storage import atomic_write as atomic_write_module
+from scripts import soak_test as soak_test_module
 from scripts.soak_test import (
+    EVIDENCE_SCHEMA_VERSION,
     EventLoopStats,
+    ProbeCadenceEvidence,
     SimulatedPingRunner,
     build_summary,
     connect_window,
     evaluate_summary,
+    minimum_probe_starts_per_target,
     parse_args,
     write_diagnostics_csv,
     write_health_csv,
@@ -162,6 +168,88 @@ def test_soak_profile_allows_explicit_cli_overrides() -> None:
     assert args.max_cpu_percent == 90.0
 
 
+def test_probe_cadence_uses_direct_due_lateness_instead_of_nearest_start() -> None:
+    evidence = ProbeCadenceEvidence(1.0)
+    evidence.scheduled(
+        "198.51.100.1",
+        scheduled_due=100.0,
+        started_at=100.0,
+        interval_seconds=1.0,
+        include_in_cadence=True,
+    )
+    evidence.scheduled(
+        "198.51.100.1",
+        scheduled_due=101.0,
+        started_at=101.6,
+        interval_seconds=1.0,
+        include_in_cadence=True,
+    )
+    evidence.started("198.51.100.1", started_at=100.0)
+    evidence.finished("198.51.100.1")
+    evidence.started("198.51.100.1", started_at=101.6)
+    evidence.finished("198.51.100.1")
+
+    summary = evidence.summary()
+
+    # round() would hide this as 0.4s against the next slot. Direct comparison
+    # with the selected current due preserves the full 0.6s scheduler delay.
+    assert summary["cadence_max_abs_grid_drift_seconds"] == pytest.approx(0.6)
+    assert summary["cadence_probe_starts"] == 2
+
+
+def test_probe_cadence_accepts_intentionally_skipped_due_slots_without_drift() -> None:
+    evidence = ProbeCadenceEvidence(1.0)
+    for due in (100.0, 104.0):
+        evidence.scheduled(
+            "198.51.100.1",
+            scheduled_due=due,
+            started_at=due + 0.1,
+            interval_seconds=1.0,
+            include_in_cadence=True,
+        )
+        evidence.started("198.51.100.1", started_at=due + 0.1)
+        evidence.finished("198.51.100.1")
+
+    summary = evidence.summary()
+
+    assert summary["cadence_max_abs_grid_drift_seconds"] == pytest.approx(0.1)
+    assert summary["cadence_max_start_gap_seconds"] == pytest.approx(4.0)
+
+
+def test_ten_second_fifty_target_timeout_stress_preserves_healthy_cadence(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "soak_test.py",
+            "--profile",
+            "long",
+            "--duration-seconds",
+            "10",
+            "--output-dir",
+            str(tmp_path),
+            "--session-log-root",
+            str(tmp_path / "session_logs"),
+            "--progress-seconds",
+            "0",
+        ],
+    )
+
+    assert soak_test_module.main() == 0
+    summary_path = next(tmp_path.glob("soak_*_targets_*.json"))
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+    assert summary["targets"] == 50
+    assert summary["timeout_ratio"] == pytest.approx(0.8)
+    assert summary["probe_target_count"] == 50
+    assert summary["probe_min_starts_per_target"] >= 1
+    assert summary["cadence_target_count"] == 10
+    assert summary["cadence_probe_starts"] >= 90
+    assert summary["cadence_max_start_gap_seconds"] <= 2.0
+    assert summary["cadence_max_abs_grid_drift_seconds"] <= 0.45
+    assert summary["max_same_target_overlap"] == 1
+
+
 def test_event_loop_stats_keep_top_gap_and_process_samples() -> None:
     stats = EventLoopStats()
     diagnostics = {
@@ -294,6 +382,22 @@ def test_soak_evidence_schema_accepts_fixed_cadence_and_session_lifecycle() -> N
     assert evaluate_summary(summary, args) == []
 
 
+def test_soak_evidence_schema_rejects_previous_cadence_semantics() -> None:
+    args = _args()
+    summary = _summary(
+        updates=1778,
+        diagnostic_samples=1778,
+        max_update_gap_seconds=2.031,
+        avg_update_gap_seconds=1.013,
+    )
+    previous_schema_version = EVIDENCE_SCHEMA_VERSION - 1
+    summary["evidence_schema_version"] = previous_schema_version
+
+    failures = evaluate_summary(summary, args)
+
+    assert f"unsupported evidence schema: {previous_schema_version} != {EVIDENCE_SCHEMA_VERSION}" in failures
+
+
 @pytest.mark.parametrize(
     "field",
     [
@@ -352,6 +456,29 @@ def test_soak_evidence_schema_rejects_incomplete_cadence_history() -> None:
     assert any("too few cadence probe starts" in failure for failure in failures)
 
 
+def test_soak_evidence_schema_rejects_incomplete_per_target_probe_coverage() -> None:
+    args = _args()
+    summary = _summary(
+        updates=1778,
+        diagnostic_samples=1778,
+        max_update_gap_seconds=2.031,
+        avg_update_gap_seconds=1.013,
+    )
+    summary["probe_target_count"] = 49
+    summary["probe_min_starts_per_target"] = (
+        minimum_probe_starts_per_target(
+            duration_seconds=args.duration_seconds,
+            interval_seconds=args.interval_seconds,
+        )
+        - 1
+    )
+
+    failures = evaluate_summary(summary, args)
+
+    assert "probe target coverage too low: 49 < 50" in failures
+    assert any("per-target probe starts too low" in failure for failure in failures)
+
+
 def test_soak_evidence_schema_rejects_unclean_shutdown_and_excessive_drift() -> None:
     args = _args()
     summary = _summary(
@@ -368,7 +495,7 @@ def test_soak_evidence_schema_rejects_unclean_shutdown_and_excessive_drift() -> 
     failures = evaluate_summary(summary, args)
 
     assert "worker did not stop cleanly" in failures
-    assert any("cadence grid drift too high" in failure for failure in failures)
+    assert any("cadence due lateness too high" in failure for failure in failures)
     assert any("cadence start gap too high" in failure for failure in failures)
 
 
@@ -622,10 +749,13 @@ def _summary(
 
 def _required_evidence() -> dict[str, object]:
     return {
-        "evidence_schema_version": 2,
+        "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
         "platform": "posix",
         "active_threads_final": 1,
         "max_active_ping_count": 20,
+        "probe_target_count": 50,
+        "probe_min_starts_per_target": 288,
+        "probe_max_starts_per_target": 1780,
         "cadence_target_count": 10,
         "cadence_probe_starts": 17_780,
         "cadence_max_abs_grid_drift_seconds": 0.05,

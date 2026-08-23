@@ -118,8 +118,8 @@ jobs:
           Add-Content $env:GITHUB_STEP_SUMMARY "- Passed: ``$($payload.passed)``"
           Add-Content $env:GITHUB_STEP_SUMMARY "- Profiles: ``$($payload.profiles_requested -join ' ')``"
           Add-Content $env:GITHUB_STEP_SUMMARY ""
-          Add-Content $env:GITHUB_STEP_SUMMARY "| Profile | Status | Duration | Cadence Drift | Overlap | Pending | Handles Growth | Resume | Loader Ownership | Memory Growth |"
-          Add-Content $env:GITHUB_STEP_SUMMARY "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- | ---: |"
+          Add-Content $env:GITHUB_STEP_SUMMARY "| Profile | Status | Duration | Due Lateness | Targets Probed | Min Starts | Overlap | Pending | Handles Growth | Resume | Loader Ownership | Memory Growth |"
+          Add-Content $env:GITHUB_STEP_SUMMARY "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | ---: |"
           foreach ($result in $payload.results) {
             $summaryPath = if ($result.summary_json -and [IO.Path]::IsPathRooted($result.summary_json)) {
               $result.summary_json
@@ -127,7 +127,7 @@ jobs:
               Join-Path (Split-Path $manifest -Parent) $result.summary_json
             } else { $null }
             $summary = if ($summaryPath -and (Test-Path $summaryPath)) { Get-Content $summaryPath -Raw | ConvertFrom-Json } else { $null }
-            Add-Content $env:GITHUB_STEP_SUMMARY "| $($result.profile) | $($result.status) | $($summary.duration_seconds) | $($summary.cadence_max_abs_grid_drift_seconds) | $($summary.max_same_target_overlap) | $($summary.max_pending_ping_count) | $($summary.process_handle_growth) | $($summary.session_resume_verified) | $($summary.session_loader_reserved_before_cleanup)/$($summary.session_loader_released_after_cleanup) | $($summary.memory_growth_bytes) |"
+            Add-Content $env:GITHUB_STEP_SUMMARY "| $($result.profile) | $($result.status) | $($summary.duration_seconds) | $($summary.cadence_max_abs_grid_drift_seconds) | $($summary.probe_target_count) | $($summary.probe_min_starts_per_target) | $($summary.max_same_target_overlap) | $($summary.max_pending_ping_count) | $($summary.process_handle_growth) | $($summary.session_resume_verified) | $($summary.session_loader_reserved_before_cleanup)/$($summary.session_loader_released_after_cleanup) | $($summary.memory_growth_bytes) |"
           }
 
       - name: Upload soak artifacts
@@ -218,8 +218,8 @@ jobs:
           Add-Content $env:GITHUB_STEP_SUMMARY "- Passed: ``$($payload.passed)``"
           Add-Content $env:GITHUB_STEP_SUMMARY "- Profiles: ``$($payload.profiles_requested -join ' ')``"
           Add-Content $env:GITHUB_STEP_SUMMARY ""
-          Add-Content $env:GITHUB_STEP_SUMMARY "| Profile | Status | Duration | Cadence Drift | Overlap | Pending | Handles Growth | Resume | Loader Ownership | Memory Growth |"
-          Add-Content $env:GITHUB_STEP_SUMMARY "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- | ---: |"
+          Add-Content $env:GITHUB_STEP_SUMMARY "| Profile | Status | Duration | Due Lateness | Targets Probed | Min Starts | Overlap | Pending | Handles Growth | Resume | Loader Ownership | Memory Growth |"
+          Add-Content $env:GITHUB_STEP_SUMMARY "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | ---: |"
           foreach ($result in $payload.results) {
             $summaryPath = if ($result.summary_json -and [IO.Path]::IsPathRooted($result.summary_json)) {
               $result.summary_json
@@ -227,7 +227,7 @@ jobs:
               Join-Path (Split-Path $manifest -Parent) $result.summary_json
             } else { $null }
             $summary = if ($summaryPath -and (Test-Path $summaryPath)) { Get-Content $summaryPath -Raw | ConvertFrom-Json } else { $null }
-            Add-Content $env:GITHUB_STEP_SUMMARY "| $($result.profile) | $($result.status) | $($summary.duration_seconds) | $($summary.cadence_max_abs_grid_drift_seconds) | $($summary.max_same_target_overlap) | $($summary.max_pending_ping_count) | $($summary.process_handle_growth) | $($summary.session_resume_verified) | $($summary.session_loader_reserved_before_cleanup)/$($summary.session_loader_released_after_cleanup) | $($summary.memory_growth_bytes) |"
+            Add-Content $env:GITHUB_STEP_SUMMARY "| $($result.profile) | $($result.status) | $($summary.duration_seconds) | $($summary.cadence_max_abs_grid_drift_seconds) | $($summary.probe_target_count) | $($summary.probe_min_starts_per_target) | $($summary.max_same_target_overlap) | $($summary.max_pending_ping_count) | $($summary.process_handle_growth) | $($summary.session_resume_verified) | $($summary.session_loader_reserved_before_cleanup)/$($summary.session_loader_released_after_cleanup) | $($summary.memory_growth_bytes) |"
           }
 
       - name: Upload soak artifacts

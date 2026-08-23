@@ -147,7 +147,9 @@ python scripts\run_stability_soak_suite.py --validate-only --run-id <RUN_ID>
 | `max_log_queue_depth` | Session Log writer backlog |
 | `max_ui_event_gap_seconds` | UI freeze 체감 가능성 |
 | `max_ui_event_process_seconds` | 한 번의 UI 작업이 event loop를 오래 점유하는지 |
-| `cadence_max_abs_grid_drift_seconds` | 완료 시간 누적으로 측정 주기가 계속 밀리지 않는지 |
+| `cadence_max_abs_grid_drift_seconds` | 선택된 due 대비 executor submit 지연이 누적되는지 |
+| `cadence_probe_starts`, `cadence_max_start_gap_seconds` | 정상 대상 runner의 실제 시작 횟수와 최대 gap |
+| `probe_target_count`, `probe_min_starts_per_target`, `probe_max_starts_per_target` | 모든 대상이 실제 실행됐고 timeout/backoff 대상도 충분히 반복됐는지 |
 | `max_same_target_overlap` | 같은 대상 ping이 중복 실행되지 않는지 |
 | `process_handle_growth` | Windows handle leak 징후 |
 | 세션 resume/loader lifecycle | 재개 관계와 QThread owner cleanup 경계 |

@@ -50,6 +50,7 @@ MultiPingCheck는 이 문제를 **측정 → bounded live cache → segmented se
 |---|---|
 | 여러 IPv4 동시 측정 | 대상별 상태를 분리하고 최대 50개까지 관리 |
 | timeout 대상이 전체 UI를 지연 | 측정 Worker와 GUI thread를 분리하고 pending ping 수를 soak에서 검증 |
+| timeout 작업이 executor를 독점 | 성공 응답이 확인된 대상을 우선하고, 미확인·실패 대상의 동시 점유를 제한해 정상 대상용 capacity를 유지 |
 | 느린 ping 때문에 주기가 계속 밀림 | 완료 시각이 아닌 예정 due-time grid에서 다음 slot을 계산하고, 놓친 slot은 폭주 없이 건너뜀 |
 | 장시간 메모리 증가 | 실시간 그래프용 메모리 보존 범위와 전체 세션 저장소를 분리 |
 | 긴 세션 전체 데이터 조회 | segmented CSV에서 필요한 범위를 별도 Loader thread로 읽음 |
@@ -211,7 +212,8 @@ CSV / XLSX / TXT export smoke
 - pending ping 수
 - log queue depth
 - UI event gap / event process time
-- 정상 대상의 due-time grid drift와 측정 시작 gap
+- 정상 대상의 예정 due 대비 submit lateness와 실제 runner 시작 gap
+- 모든 대상의 실제 probe 시작 coverage와 대상별 최소/최대 횟수
 - 동일 대상 probe 최대 동시 실행 수(1 이하여야 함)
 - Windows process handle 증가량
 - 세션 resume 기록과 background loader 소유권 정리
