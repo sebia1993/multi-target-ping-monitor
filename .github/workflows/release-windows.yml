@@ -4,36 +4,44 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag. Leave empty to generate vYYYY.MM.DD-HHMMSS in KST."
+        description: "비우면 단일 버전 원본에서 Release tag를 계산합니다."
         required: false
+        default: ""
         type: string
       title:
-        description: "Release title. Leave empty to use MultiPingCheck <tag>."
+        description: "비우면 단일 버전 원본에서 Release title을 계산합니다."
         required: false
+        default: ""
         type: string
       notes:
-        description: "Optional release note text to place above the generated commit summary."
+        description: "Optional release note text"
         required: false
+        default: ""
         type: string
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 concurrency:
-  group: release-windows-${{ github.ref }}
+  group: release-windows
   cancel-in-progress: false
 
 jobs:
   release:
-    name: Build, verify, and publish Windows release
+    name: Build, attest, and publish Windows release
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 100
+    env:
+      QT_QPA_PLATFORM: offscreen
+      RELEASE_TAG: ${{ inputs.tag }}
     steps:
       - name: Ensure main branch
         shell: pwsh
         run: |
           if ("${{ github.ref_name }}" -ne "main") {
-            throw "Windows release publishing is allowed only from main. Current ref: ${{ github.ref }}"
+            throw "Release publishing is allowed only from main"
           }
 
       - name: Check out repository
@@ -41,45 +49,172 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-
-      - name: Configure Git release identity
-        shell: pwsh
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout main
-          git pull --ff-only origin main
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: requirements-dev.lock
 
-      - name: Install dependencies
+      - name: Install hash-locked dependencies
         shell: pwsh
         run: |
-          python -m pip install --upgrade pip
-          if ($LASTEXITCODE -ne 0) { throw "pip bootstrap failed." }
-          python -m pip install -r requirements.txt
-          if ($LASTEXITCODE -ne 0) { throw "dependency installation failed." }
+          python -m pip install --require-hashes -r requirements-dev.lock
+          if ($LASTEXITCODE -ne 0) { throw "dependency installation failed" }
 
-      - name: Build, verify, and publish Release
+      - name: Resolve versioned asset metadata
+        id: metadata
+        shell: pwsh
+        env:
+          REQUESTED_TITLE: ${{ inputs.title }}
+        run: |
+          $version = (python -c "from app import __version__; print(__version__)").Trim()
+          $expectedTag = "v$version"
+          $requestedTag = $env:RELEASE_TAG.Trim()
+          if ($requestedTag -and $requestedTag -ne $expectedTag) { throw "tag/version mismatch" }
+          $releaseTitle = $env:REQUESTED_TITLE.Trim()
+          if (-not $releaseTitle) { $releaseTitle = "MultiPingCheck $expectedTag" }
+          if ($releaseTitle -match "[`r`n]") { throw "release title must be one line" }
+          $safeTag = $expectedTag -replace '[^A-Za-z0-9._-]', '_'
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=$expectedTag" >> $env:GITHUB_OUTPUT
+          "title=$releaseTitle" >> $env:GITHUB_OUTPUT
+          "zip_path=release/MultiPingCheck_$safeTag.zip" >> $env:GITHUB_OUTPUT
+          "checksum_path=release/MultiPingCheck_$safeTag.zip.sha256" >> $env:GITHUB_OUTPUT
+          "sbom_path=release/MultiPingCheck_${safeTag}_sbom.cdx.json" >> $env:GITHUB_OUTPUT
+          "manifest_path=release/MultiPingCheck_${safeTag}_release-manifest.json" >> $env:GITHUB_OUTPUT
+
+      - name: Build and verify release assets without publishing
+        shell: pwsh
+        env:
+          RESOLVED_TAG: ${{ steps.metadata.outputs.tag }}
+          RELEASE_TITLE: ${{ steps.metadata.outputs.title }}
+        run: |
+          .\scripts\publish_release.ps1 -Tag $env:RESOLVED_TAG -Title $env:RELEASE_TITLE -SkipUpload
+          if ($LASTEXITCODE -ne 0) { throw "release preparation failed" }
+
+      - name: Attest ZIP build provenance
+        id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.metadata.outputs.zip_path }}
+
+      - name: Attest runtime SBOM
+        id: sbom-attestation
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: ${{ steps.metadata.outputs.zip_path }}
+          sbom-path: ${{ steps.metadata.outputs.sbom_path }}
+
+      - name: Create or validate annotated tag
+        id: tag
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.tag }}
-          RELEASE_TITLE: ${{ inputs.title }}
-          RELEASE_NOTES: ${{ inputs.notes }}
+          RELEASE_TITLE: ${{ steps.metadata.outputs.title }}
+          RESOLVED_TAG: ${{ steps.metadata.outputs.tag }}
         run: |
-          $releaseArgs = @()
-          if (-not [string]::IsNullOrWhiteSpace($env:RELEASE_TAG)) {
-            $releaseArgs += @("-Tag", $env:RELEASE_TAG.Trim())
+          $ErrorActionPreference = "Stop"
+          gh auth setup-git
+          if ($LASTEXITCODE -ne 0) { throw "failed to configure authenticated git" }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --tags --force
+          if ($LASTEXITCODE -ne 0) { throw "failed to fetch tags" }
+          "created=false" >> $env:GITHUB_OUTPUT
+          git rev-parse -q --verify "refs/tags/$env:RESOLVED_TAG" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            $tagObjectType = (git cat-file -t "refs/tags/$env:RESOLVED_TAG").Trim()
+            if ($LASTEXITCODE -ne 0 -or $tagObjectType -ne "tag") {
+              throw "existing release tag is not annotated"
+            }
+            $target = (git rev-list -n 1 $env:RESOLVED_TAG).Trim()
+            $head = (git rev-parse HEAD).Trim()
+            if ($target -ne $head) { throw "existing tag targets a different commit" }
           }
-          if (-not [string]::IsNullOrWhiteSpace($env:RELEASE_TITLE)) {
-            $releaseArgs += @("-Title", $env:RELEASE_TITLE.Trim())
+          else {
+            git tag -a $env:RESOLVED_TAG -m $env:RELEASE_TITLE
+            if ($LASTEXITCODE -ne 0) { throw "failed to create annotated tag" }
+            git push origin $env:RESOLVED_TAG
+            if ($LASTEXITCODE -ne 0) { throw "failed to publish annotated tag" }
+            "created=true" >> $env:GITHUB_OUTPUT
           }
-          if (-not [string]::IsNullOrWhiteSpace($env:RELEASE_NOTES)) {
-            $releaseArgs += @("-Notes", $env:RELEASE_NOTES.Trim())
+
+      - name: Publish normal GitHub release
+        id: publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TITLE: ${{ steps.metadata.outputs.title }}
+          RELEASE_NOTES: ${{ inputs.notes }}
+          RESOLVED_TAG: ${{ steps.metadata.outputs.tag }}
+          ZIP_PATH: ${{ steps.metadata.outputs.zip_path }}
+          CHECKSUM_PATH: ${{ steps.metadata.outputs.checksum_path }}
+          SBOM_PATH: ${{ steps.metadata.outputs.sbom_path }}
+          MANIFEST_PATH: ${{ steps.metadata.outputs.manifest_path }}
+          PROVENANCE_URL: ${{ steps.provenance.outputs.attestation-url }}
+          SBOM_ATTESTATION_URL: ${{ steps.sbom-attestation.outputs.attestation-url }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          "attempted=false" >> $env:GITHUB_OUTPUT
+          $notesPath = Join-Path $env:RUNNER_TEMP "multiping-release-notes.md"
+          @"
+          $env:RELEASE_NOTES
+
+          ## 검증 가능한 배포 증거
+
+          - Windows source/package verifier 통과
+          - SHA-256 sidecar 및 독립 asset verifier 통과
+          - CycloneDX 1.6 runtime SBOM 포함
+          - Build provenance: $env:PROVENANCE_URL
+          - SBOM attestation: $env:SBOM_ATTESTATION_URL
+          - 실제 운영망 검증과 코드서명은 포함하지 않음
+          "@ | Set-Content -LiteralPath $notesPath -Encoding UTF8
+
+          gh release view $env:RESOLVED_TAG *> $null
+          if ($LASTEXITCODE -eq 0) { throw "release already exists" }
+          "attempted=true" >> $env:GITHUB_OUTPUT
+          gh release create $env:RESOLVED_TAG `
+            $env:ZIP_PATH `
+            $env:CHECKSUM_PATH `
+            $env:SBOM_PATH `
+            $env:MANIFEST_PATH `
+            --verify-tag `
+            --title $env:RELEASE_TITLE `
+            --notes-file $notesPath `
+            --latest
+          if ($LASTEXITCODE -ne 0) { throw "GitHub release publication failed" }
+
+      - name: Remove only the tag created by this failed publish
+        if: failure() && steps.tag.outputs.created == 'true' && steps.publish.outcome == 'failure'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESOLVED_TAG: ${{ steps.metadata.outputs.tag }}
+        run: |
+          $ErrorActionPreference = "Continue"
+          $cleanupFailed = $false
+          if ("${{ steps.publish.outputs.attempted }}" -eq "true") {
+            gh release view $env:RESOLVED_TAG *> $null
+            if ($LASTEXITCODE -eq 0) {
+              gh release delete $env:RESOLVED_TAG --yes
+              if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
+            }
           }
-          .\scripts\publish_release.ps1 @releaseArgs
+          git push origin ":refs/tags/$env:RESOLVED_TAG"
+          if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
+          git tag -d $env:RESOLVED_TAG
+          if ($LASTEXITCODE -ne 0) { $cleanupFailed = $true }
+          $remaining = git ls-remote --tags origin "refs/tags/$env:RESOLVED_TAG"
+          if ($LASTEXITCODE -ne 0 -or $remaining) { $cleanupFailed = $true }
+          if ($cleanupFailed) { throw "failed to clean up newly created tag" }
+
+      - name: Upload prepared evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: MultiPingCheck-${{ steps.metadata.outputs.tag }}-release-evidence-${{ github.run_id }}
+          path: release/**
+          if-no-files-found: warn

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime
 import json
+import re
+from datetime import datetime
 from pathlib import Path
 
 import scripts.verify_release as verify_release
@@ -25,8 +26,9 @@ def test_custom_target_smoke_runs_read_only_ping_and_trace(monkeypatch) -> None:
     monkeypatch.setattr(
         verify_release,
         "run_traceroute",
-        lambda target, max_hops, timeout_ms: calls.append(("tracert", target))
-        or [HopInfo(index=1, address="192.0.2.1")],
+        lambda target, max_hops, timeout_ms: (
+            calls.append(("tracert", target)) or [HopInfo(index=1, address="192.0.2.1")]
+        ),
     )
 
     verify_release.run_custom_target_smoke("192.0.2.1")
@@ -76,6 +78,21 @@ def test_release_policy_accepts_windowed_non_admin_package(monkeypatch, tmp_path
     monkeypatch.setattr(verify_release, "ROOT", tmp_path)
 
     verify_release.run_release_policy_check()
+
+
+def test_application_version_has_one_executable_source() -> None:
+    root = Path(__file__).resolve().parents[1]
+    app_init = (root / "app" / "__init__.py").read_text(encoding="utf-8")
+
+    assert app_init.count('__version__ = "0.2.0"') == 1
+    for path in [
+        root / "pyproject.toml",
+        root / "build_windows_exe.ps1",
+        *sorted((root / "scripts").glob("*")),
+        *sorted((root / ".github" / "workflows").glob("*.yml")),
+    ]:
+        if path.is_file():
+            assert "0.2.0" not in path.read_text(encoding="utf-8-sig"), path
 
 
 def test_release_policy_rejects_admin_manifest(monkeypatch, tmp_path) -> None:
@@ -135,9 +152,7 @@ def test_run_pytest_uses_release_timeout(monkeypatch) -> None:
 
     verify_release.run_pytest()
 
-    assert calls == [
-        ([verify_release.sys.executable, "-m", "pytest"], verify_release.PYTEST_TIMEOUT_SECONDS, None)
-    ]
+    assert calls == [([verify_release.sys.executable, "-m", "pytest"], verify_release.PYTEST_TIMEOUT_SECONDS, None)]
     assert verify_release.PYTEST_TIMEOUT_SECONDS >= 600
 
 
@@ -211,6 +226,8 @@ def test_publish_release_notes_include_traceable_zip_metadata() -> None:
     assert "IPv4 주소는 한 줄에 하나씩" in text
     assert "APP_STARTUP_FAILED 또는 APP_UNEXPECTED_ERROR" in text
     assert "%LOCALAPPDATA%\\MultiPingCheck\\logs\\multipingcheck.log" in text
+    assert '"--manifest", $ManifestItem.FullName' in text
+    assert '"--expected-source-commit", $Head' in text
 
 
 def test_release_windows_workflow_matches_publish_contract() -> None:
@@ -222,29 +239,92 @@ def test_release_windows_workflow_matches_publish_contract() -> None:
     for input_name in ("tag:", "title:", "notes:"):
         assert input_name in text
     assert "contents: write" in text
+    assert "id-token: write" in text
+    assert "attestations: write" in text
     assert "runs-on: windows-latest" in text
     assert "fetch-depth: 0" in text
     assert 'github.ref_name }}" -ne "main"' in text
     assert "GH_TOKEN: ${{ github.token }}" in text
-    assert ".\\scripts\\publish_release.ps1 @releaseArgs" in text
+    assert 'version = (python -c "from app import __version__' in text
+    assert 'if (-not $releaseTitle) { $releaseTitle = "MultiPingCheck $expectedTag" }' in text
+    assert '"title=$releaseTitle" >> $env:GITHUB_OUTPUT' in text
+    assert "zip_path=release/MultiPingCheck_$safeTag.zip" in text
+    assert "checksum_path=release/MultiPingCheck_$safeTag.zip.sha256" in text
+    assert "sbom_path=release/MultiPingCheck_${safeTag}_sbom.cdx.json" in text
+    assert "manifest_path=release/MultiPingCheck_${safeTag}_release-manifest.json" in text
+    assert ".\\scripts\\publish_release.ps1 -Tag $env:RESOLVED_TAG" in text
+    assert "-SkipUpload" in text
+    assert "actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2" in text
+    assert "actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0" in text
+    assert "git tag -a $env:RESOLVED_TAG" in text
+    assert 'git cat-file -t "refs/tags/$env:RESOLVED_TAG"' in text
+    assert '"created=false" >> $env:GITHUB_OUTPUT' in text
+    assert '"created=true" >> $env:GITHUB_OUTPUT' in text
+    assert "--verify-tag" in text
+    assert "--latest" in text
+    assert "--prerelease" not in text
+    assert "--draft" not in text
+    assert "release/MultiPingCheck_v0.2.0" not in text
+    assert 'default: "v0.2.0"' not in text
+    assert 'default: "MultiPingCheck v0.2.0"' not in text
 
 
-def test_windows_ci_workflows_keep_fast_and_final_checks_separate() -> None:
+def test_release_workflow_cleans_only_a_tag_created_by_failed_publication() -> None:
+    text = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "release-windows.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "if: failure() && steps.tag.outputs.created == 'true' && steps.publish.outcome == 'failure'" in text
+    assert '"attempted=false" >> $env:GITHUB_OUTPUT' in text
+    assert '"attempted=true" >> $env:GITHUB_OUTPUT' in text
+    assert 'if ("${{ steps.publish.outputs.attempted }}" -eq "true")' in text
+    assert 'git push origin ":refs/tags/$env:RESOLVED_TAG"' in text
+    assert 'git ls-remote --tags origin "refs/tags/$env:RESOLVED_TAG"' in text
+    assert "$cleanupFailed = $true" in text
+    assert 'throw "failed to clean up newly created tag"' in text
+
+
+def test_ci_workflow_consolidates_quality_and_windows_package_checks() -> None:
     root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
-    fast = (root / "windows-fast-check.yml").read_text(encoding="utf-8")
-    final = (root / "windows-release-verify.yml").read_text(encoding="utf-8")
+    ci = (root / "ci.yml").read_text(encoding="utf-8")
 
-    assert "push:" in fast
-    assert "pull_request:" in fast
-    assert "python scripts\\verify_release.py" in fast
-    assert "build_windows_exe.ps1" not in fast
+    assert "push:" in ci
+    assert "pull_request:" in ci
+    assert "Quality, tests, and security" in ci
+    assert "Windows package validation" in ci
+    assert "python -m pip install --require-hashes -r requirements-dev.lock" in ci
+    assert "python -m ruff check app scripts tests" in ci
+    assert "python -m ruff format --check" in ci
+    assert "python -m ruff check --select I" in ci
+    assert "python -m pytest -q" in ci
+    assert "python -m pip_audit -r requirements.lock --require-hashes" in ci
+    assert "python scripts/scan_secrets.py" in ci
+    assert "python scripts\\verify_release.py" in ci
+    assert "build_windows_exe.ps1" in ci
+    assert "python scripts\\verify_release.py --exe" in ci
+    assert "cyclonedx-py requirements requirements.lock" in ci
+    assert not (root / "windows-fast-check.yml").exists()
+    assert not (root / "windows-release-verify.yml").exists()
 
-    assert "workflow_dispatch:" in final
-    assert "push:" not in final
-    assert "pull_request:" not in final
-    assert "python scripts\\verify_release.py" in final
-    assert "build_windows_exe.ps1" in final
-    assert "python scripts\\verify_release.py --exe" in final
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'select = ["E9", "F63", "F7", "F82"]' in pyproject
+
+
+def test_all_workflow_actions_are_exact_reviewed_node24_pins() -> None:
+    root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+    workflow_text = "\n".join(path.read_text(encoding="utf-8") for path in sorted(root.glob("*.yml")))
+    action_refs = re.findall(r"^\s*uses:\s*([^\s#]+)", workflow_text, flags=re.MULTILINE)
+
+    assert action_refs
+    assert all(re.fullmatch(r"[^@]+@[0-9a-f]{40}", action_ref) for action_ref in action_refs)
+    allowed_pins = {
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+        "actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8",
+        "actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e",
+    }
+    assert set(action_refs) == allowed_pins
 
 
 class _Signal:
@@ -317,11 +397,28 @@ def _write_policy_tree(
         "--add-data metadata;. app\\main.py\npython scripts\\generate_build_info.py"
     ),
     spec: str = "a = Analysis(excludes=['numpy', 'PIL', 'lxml', 'PySide6.QtQuick', 'PySide6.QtPdf'])\nexe = EXE(console=False)",
-    requirements: str = "PySide6>=6.7\nopenpyxl>=3.1\n",
+    requirements: str = (
+        "PySide6==6.10.3 \\\n"
+        "    --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        "openpyxl==3.1.5 \\\n"
+        "    --hash=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+    ),
     app_source: str = "import subprocess\n",
 ) -> None:
     (root / "app").mkdir()
     (root / "app" / "main.py").write_text(app_source, encoding="utf-8")
     (root / "build_windows_exe.ps1").write_text(build_script, encoding="utf-8")
     (root / "MultiPingCheck.spec").write_text(spec, encoding="utf-8")
-    (root / "requirements.txt").write_text(requirements, encoding="utf-8")
+    (root / "requirements.lock").write_text(requirements, encoding="utf-8")
+    dev_requirements = (
+        requirements
+        + "pefile==2024.8.26 ; sys_platform == 'win32' \\\n"
+        + "    --hash=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n"
+        + "pywin32-ctypes==0.2.3 ; sys_platform == 'win32' \\\n"
+        + "    --hash=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\n"
+    )
+    (root / "requirements-dev.lock").write_text(dev_requirements, encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        '[project]\ndynamic = ["version"]\n[tool.setuptools.dynamic]\nversion = {attr = "app.__version__"}\n',
+        encoding="utf-8",
+    )

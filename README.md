@@ -1,6 +1,8 @@
 # MultiPingCheck — 다중 대상 네트워크 품질 모니터링
 
-[![Windows Fast Check](https://github.com/sebia1993/ping/actions/workflows/windows-fast-check.yml/badge.svg?branch=main)](https://github.com/sebia1993/ping/actions/workflows/windows-fast-check.yml)
+[![CI](https://github.com/sebia1993/multi-target-ping-monitor/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sebia1993/multi-target-ping-monitor/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/sebia1993/multi-target-ping-monitor/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/sebia1993/multi-target-ping-monitor/security/code-scanning)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 **최대 50개의 IPv4 대상을 주기적으로 측정해 지연시간·패킷 손실·상태 변화를 실시간으로 표시하고, 장시간 측정 이력을 세션 단위로 보존·복구하는 Windows 네트워크 관측 도구입니다.**
 
@@ -24,6 +26,7 @@
 | 내보내기 | CSV / XLSX / TXT·HTML 보고서 / PNG / 통계 |
 | 실행 환경 | Windows 일반 사용자 권한, PySide6 |
 | 배포 | `MultiPingCheck.exe` 포함 Windows ZIP |
+| 현재 버전 | `0.2.0` |
 | 안정성 검증 | deterministic 50-target soak + 4/8/24시간 및 UI 10/20/50대 프로필 |
 
 ## 해결하려 한 운영 문제
@@ -47,6 +50,7 @@ MultiPingCheck는 이 문제를 **측정 → bounded live cache → segmented se
 |---|---|
 | 여러 IPv4 동시 측정 | 대상별 상태를 분리하고 최대 50개까지 관리 |
 | timeout 대상이 전체 UI를 지연 | 측정 Worker와 GUI thread를 분리하고 pending ping 수를 soak에서 검증 |
+| 느린 ping 때문에 주기가 계속 밀림 | 완료 시각이 아닌 예정 due-time grid에서 다음 slot을 계산하고, 놓친 slot은 폭주 없이 건너뜀 |
 | 장시간 메모리 증가 | 실시간 그래프용 메모리 보존 범위와 전체 세션 저장소를 분리 |
 | 긴 세션 전체 데이터 조회 | segmented CSV에서 필요한 범위를 별도 Loader thread로 읽음 |
 | 이전 Loader 결과가 늦게 도착 | request generation과 QThread lifecycle로 오래된 결과가 현재 화면을 덮지 못하게 함 |
@@ -207,6 +211,10 @@ CSV / XLSX / TXT export smoke
 - pending ping 수
 - log queue depth
 - UI event gap / event process time
+- 정상 대상의 due-time grid drift와 측정 시작 gap
+- 동일 대상 probe 최대 동시 실행 수(1 이하여야 함)
+- Windows process handle 증가량
+- 세션 resume 기록과 background loader 소유권 정리
 
 UI 10/20/50대 프로필은 기본적으로 event gap과 event 처리 시간이 **0.2초 이하인지** 검증합니다. 상세 기준은 [안정성 soak](docs/stability_soak.md)와 [검증 보고서](docs/VALIDATION_REPORT.md)에 있습니다.
 
@@ -236,6 +244,17 @@ UI 10/20/50대 프로필은 기본적으로 event gap과 event 처리 시간이 
 7. 측정을 끝낼 때 `중지`를 누릅니다.
 
 프로그램은 일반 사용자 권한으로 동작하도록 배포 검증합니다. 처음 실행할 때 Windows SmartScreen이 표시되면 Release 출처와 SHA-256을 먼저 확인하십시오.
+
+## 증거의 범위
+
+| 증거 | 확인하는 것 | 확인하지 못하는 것 |
+|---|---|---|
+| Unit/통합 테스트 | cadence, overlap 방지, 저장·복구, UI lifecycle의 결정 가능한 동작 | 실제 장비·방화벽·VPN 조합 |
+| Simulated soak | timeout이 많은 50-target 부하, 메모리/thread/handle, 세션·loader 수명 | 실제 패킷이 통과하는지 여부 |
+| Windows package CI | Windows runner에서 EXE 빌드·기동·종료, ZIP 구조 | 코드서명, 모든 EDR/보안 정책 |
+| Field verification | 허가된 실제 네트워크에서 ICMP/Tracert와 사용자 흐름 | CI로 자동 재현되지 않음 |
+
+공개 CI와 4시간 soak는 synthetic RFC 5737 데이터를 사용합니다. 따라서 자동 검증 통과를 실제 운영망 호환성이나 장애 원인 규명의 증명으로 표현하지 않습니다.
 
 ## 운영 안전·민감정보 경계
 
@@ -276,7 +295,7 @@ python scripts\verify_release.py --target <FIELD_TARGET>
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+python -m pip install --require-hashes -r requirements-dev.lock
 python -m app.main
 ```
 
@@ -290,12 +309,17 @@ Windows Release는 `Release Windows ZIP` GitHub Actions를 **main 브랜치에�
 소스 검증
 → Windows EXE 빌드
 → 패키지 검증
-→ ZIP / SHA-256 생성
+→ ZIP / SHA-256 / CycloneDX SBOM 생성·검증
+→ Build provenance·SBOM attestation
 → Git tag
 → GitHub Release
 ```
 
 EXE/ZIP/checksum은 소스 저장소에 커밋하지 않고 Release asset으로 게시합니다. 절차는 [Release 체크리스트](docs/release_checklist.md)를 참고하십시오.
+
+## License
+
+소스 코드는 [MIT License](LICENSE)로 공개합니다. Windows 배포 ZIP에 포함되는 제3자 구성요소는 함께 게시되는 CycloneDX SBOM에서 확인할 수 있습니다.
 
 ## 문서
 

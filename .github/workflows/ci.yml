@@ -1,0 +1,160 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality, tests, and security
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+
+      - name: Install hash-locked dependencies
+        run: python -m pip install --require-hashes -r requirements-dev.lock
+
+      - name: Install headless Qt runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libegl1
+
+      - name: Run syntax and undefined-name gate
+        run: python -m ruff check app scripts tests
+
+      - name: Check formatting and import order for changed quality boundary
+        run: |
+          python -m ruff format --check \
+            app/__init__.py \
+            app/ui/session_open_worker.py \
+            app/ui/worker.py \
+            scripts/run_stability_soak_suite.py \
+            scripts/scan_secrets.py \
+            scripts/soak_test.py \
+            scripts/verify_release.py \
+            scripts/verify_release_assets.py \
+            tests/test_security_check.py \
+            tests/test_soak_test.py \
+            tests/test_stability_soak_suite.py \
+            tests/test_verify_release.py \
+            tests/test_verify_release_assets.py \
+            tests/test_worker.py
+          python -m ruff check --select I \
+            app/__init__.py \
+            app/ui/session_open_worker.py \
+            app/ui/worker.py \
+            scripts/run_stability_soak_suite.py \
+            scripts/scan_secrets.py \
+            scripts/soak_test.py \
+            scripts/verify_release.py \
+            scripts/verify_release_assets.py \
+            tests/test_security_check.py \
+            tests/test_soak_test.py \
+            tests/test_stability_soak_suite.py \
+            tests/test_verify_release.py \
+            tests/test_verify_release_assets.py \
+            tests/test_worker.py
+
+      - name: Compile Python sources
+        run: python -m compileall -q app scripts tests
+
+      - name: Run test suite
+        run: python -m pytest -q
+
+      - name: Audit runtime dependency lock
+        run: python -m pip_audit -r requirements.lock --require-hashes --progress-spinner=off
+
+      - name: Scan tracked text for high-confidence secrets
+        run: python scripts/scan_secrets.py
+
+  windows-package:
+    name: Windows package validation
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+
+      - name: Install hash-locked dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --require-hashes -r requirements-dev.lock
+          if ($LASTEXITCODE -ne 0) { throw "dependency installation failed" }
+
+      - name: Run source release verifier
+        shell: pwsh
+        run: python scripts\verify_release.py
+
+      - name: Build Windows EXE
+        shell: pwsh
+        run: .\build_windows_exe.ps1
+
+      - name: Verify packaged EXE
+        shell: pwsh
+        run: python scripts\verify_release.py --exe
+
+      - name: Generate reproducible runtime SBOM
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          cyclonedx-py requirements requirements.lock --output-reproducible --output-format JSON --output-file artifacts\multipingcheck-sbom.cdx.json
+          if ($LASTEXITCODE -ne 0) { throw "SBOM generation failed" }
+          $sbom = Get-Content artifacts\multipingcheck-sbom.cdx.json -Raw | ConvertFrom-Json
+          if ($sbom.specVersion -ne "1.6" -or @($sbom.components).Count -lt 1) {
+            throw "SBOM validation failed"
+          }
+
+      - name: Upload verified Windows package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: MultiPingCheck-windows-${{ github.run_id }}
+          path: |
+            dist/MultiPingCheck/**
+            artifacts/multipingcheck-sbom.cdx.json
+          if-no-files-found: error
+
+      - name: Upload package diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-package-debug-${{ github.run_id }}
+          path: |
+            build/**
+            dist/**
+            artifacts/**
+          if-no-files-found: ignore

@@ -9,9 +9,11 @@ from concurrent.futures import (
     FIRST_COMPLETED,
     Future,
     ThreadPoolExecutor,
-    TimeoutError as FutureTimeoutError,
     as_completed,
     wait,
+)
+from concurrent.futures import (
+    TimeoutError as FutureTimeoutError,
 )
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -47,7 +49,6 @@ from app.storage.session_index import (
 from app.storage.session_log import SessionLogWriter
 from app.utils.diagnostics import operation_failure
 from app.utils.validators import parse_ipv4_targets, validate_target
-
 
 # 여러 IP를 동시에 측정할 때 프로그램이 과도하게 많은 ping/tracert를 만들지 않도록
 # 제한값을 한곳에 모아 둡니다. 숫자를 바꾸면 성능과 안정성에 직접 영향이 있습니다.
@@ -121,7 +122,13 @@ class SessionLogBackpressureError(RuntimeError):
 
 @dataclass
 class TargetProbeState:
-    """대상 IP 하나의 다음 측정 시각과 실패 누적 상태를 보관합니다."""
+    """대상 IP 하나의 고정 cadence와 실패 누적 상태를 보관합니다.
+
+    ``next_due``는 마지막 ping이 *끝난 시각*이 아니라 계획된 due-time에서
+    전진합니다. 느린 ping이나 일시적인 scheduler 지연 때문에 간격이 계속
+    밀리는 drift를 막고, 놓친 slot은 한 번에 하나씩 몰아서 실행하지 않고
+    다음 미래 slot까지 건너뜁니다.
+    """
 
     target: str
     next_due: float = 0.0
@@ -130,6 +137,39 @@ class TargetProbeState:
     last_status: str = "WAITING"
     last_started_at: float = 0.0
     last_completed_at: float = 0.0
+    last_scheduled_due: float = 0.0
+    configured_interval_seconds: float | None = None
+    scheduled_count: int = 0
+    skipped_slot_count: int = 0
+    max_start_lateness_seconds: float = 0.0
+
+    def is_due(self, base_interval_seconds: float, now: float) -> bool:
+        """Apply interval changes and report whether one probe may start now."""
+
+        effective_interval = self._next_interval(base_interval_seconds)
+        if self.configured_interval_seconds is None:
+            self.configured_interval_seconds = base_interval_seconds
+            self.current_interval_seconds = effective_interval
+            self.next_due = now
+        elif effective_interval != self.current_interval_seconds:
+            self.configured_interval_seconds = base_interval_seconds
+            self.current_interval_seconds = effective_interval
+            anchor = self.last_scheduled_due or self.last_started_at
+            self.next_due, skipped = self._future_due(anchor, effective_interval, now)
+            self.skipped_slot_count += skipped
+        return effective_interval <= 0 or now >= self.next_due
+
+    def mark_started(self, now: float) -> None:
+        """Reserve the currently due slot before submitting the Future."""
+
+        scheduled_due = self.next_due if self.current_interval_seconds > 0 else now
+        self.last_scheduled_due = scheduled_due
+        self.last_started_at = now
+        self.scheduled_count += 1
+        self.max_start_lateness_seconds = max(
+            self.max_start_lateness_seconds,
+            max(now - scheduled_due, 0.0),
+        )
 
     def record_result(self, result: PingResult, base_interval_seconds: float, now: float) -> None:
         self.last_status = result.status
@@ -139,9 +179,26 @@ class TargetProbeState:
         else:
             self.consecutive_failures += 1
 
-        self.current_interval_seconds = self._next_interval(base_interval_seconds)
-        base_time = self.last_started_at or now
-        self.next_due = base_time + self.current_interval_seconds
+        next_interval = self._next_interval(base_interval_seconds)
+        self.configured_interval_seconds = base_interval_seconds
+        self.current_interval_seconds = next_interval
+        anchor = self.last_scheduled_due or self.last_started_at or now
+        self.next_due, skipped = self._future_due(anchor, next_interval, now)
+        self.skipped_slot_count += skipped
+
+    @staticmethod
+    def _future_due(anchor: float, interval_seconds: float, now: float) -> tuple[float, int]:
+        """Return the first future slot and the number of missed slots."""
+
+        if interval_seconds <= 0:
+            return now, 0
+        if anchor <= 0:
+            return now + interval_seconds, 0
+        due = anchor + interval_seconds
+        if due > now:
+            return due, 0
+        missed = math.floor((now - due) / interval_seconds) + 1
+        return due + missed * interval_seconds, missed
 
     def _next_interval(self, base_interval_seconds: float) -> float:
         # 연속 실패가 많은 대상은 잠시 느리게 측정합니다. 응답이 없는 IP가 많아도
@@ -171,6 +228,9 @@ class WorkerDiagnostics:
     target_probe_engine: str = "ICMP"
     route_probe_engine: str = "tracert/ICMP"
     tcp_port: int | None = None
+    cadence_scheduled_count: int = 0
+    cadence_skipped_slot_count: int = 0
+    max_cadence_start_lateness_ms: float = 0.0
 
 
 class _ThreadLocalPingProbePool:
@@ -476,9 +536,7 @@ class MeasurementWorker(QThread):
             return []
         with self._control_lock:
             remove_set = set(normalized)
-            self._pending_add_targets = [
-                target for target in self._pending_add_targets if target not in remove_set
-            ]
+            self._pending_add_targets = [target for target in self._pending_add_targets if target not in remove_set]
             removals = [target for target in self.targets if target in remove_set]
             self._pending_remove_targets.update(removals)
             self._paused_targets.difference_update(remove_set)
@@ -745,11 +803,7 @@ class MeasurementWorker(QThread):
                 if self.max_cycles is not None and full_cycles >= self.max_cycles:
                     break
 
-                if (
-                    self._uses_full_route()
-                    and trace_future is None
-                    and time.monotonic() >= next_trace_refresh_due
-                ):
+                if self._uses_full_route() and trace_future is None and time.monotonic() >= next_trace_refresh_due:
                     trace_future = self._start_trace_refresh(trace_executor)
 
                 self._sleep_until_next_round(
@@ -941,9 +995,9 @@ class MeasurementWorker(QThread):
             if target in active_targets:
                 continue
             interval_seconds = self._target_base_interval_seconds(target)
-            if interval_seconds > 0 and now < state.next_due:
+            if not state.is_due(interval_seconds, now):
                 continue
-            state.last_started_at = now
+            state.mark_started(now)
             future = executor.submit(self._ping_target, target)
             futures[future] = state
             active_targets.add(target)
@@ -1105,11 +1159,7 @@ class MeasurementWorker(QThread):
             config=self.alert_rule_config,
         )
         route_adjustment_keys = active_keys.intersection(AUTO_FULL_ROUTE_ALERT_KEYS)
-        if (
-            self.measurement_mode == MEASUREMENT_MODE_FINAL_HOP_ONLY
-            and trace_future is None
-            and route_adjustment_keys
-        ):
+        if self.measurement_mode == MEASUREMENT_MODE_FINAL_HOP_ONLY and trace_future is None and route_adjustment_keys:
             reason = "대상 알림"
             for event in events:
                 if event.key in route_adjustment_keys:
@@ -1244,6 +1294,12 @@ class MeasurementWorker(QThread):
                 target_probe_engine=self._target_probe_label(),
                 route_probe_engine=self._route_probe_label(),
                 tcp_port=self.tcp_port if self.probe_engine == PROBE_ENGINE_TCP_CONNECT else None,
+                cadence_scheduled_count=sum(state.scheduled_count for state in target_states.values()),
+                cadence_skipped_slot_count=sum(state.skipped_slot_count for state in target_states.values()),
+                max_cadence_start_lateness_ms=max(
+                    (state.max_start_lateness_seconds * 1000 for state in target_states.values()),
+                    default=0.0,
+                ),
             )
         )
 
@@ -1389,7 +1445,8 @@ class MeasurementWorker(QThread):
                 self.targets.remove(target)
             target_trackers.pop(target, None)
             target_states.pop(target, None)
-            active_target_pings.discard(target)
+            # 실행 중인 Future가 끝날 때까지 reservation은 유지합니다. 같은 IP를
+            # 삭제 후 즉시 재추가해도 이전 ping과 새 ping이 겹치지 않아야 합니다.
 
         for target in additions:
             if len(self.targets) >= MAX_IPV4_TARGETS or target in self.targets:

@@ -10,7 +10,6 @@ import pytest
 from app.storage import atomic_write as atomic_write_module
 from scripts import run_stability_soak_suite as suite
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -49,17 +48,39 @@ def test_soak_suite_duration_override_is_explicit_for_smoke_only(tmp_path) -> No
     assert command[-2:] == ["--duration-seconds", "3.0"]
 
 
+def test_soak_suite_rejects_duration_override_for_long4h_evidence(tmp_path) -> None:
+    with pytest.raises(ValueError, match="fixed-duration evidence"):
+        suite.build_profile_command(
+            "long4h",
+            output_dir=tmp_path / "long4h",
+            python_executable="python",
+            override_duration_seconds=3.0,
+        )
+
+    with pytest.raises(SystemExit):
+        suite.parse_args(
+            [
+                "--profiles",
+                "long4h",
+                "--override-duration-seconds",
+                "3",
+            ]
+        )
+
+
 def test_soak_suite_dry_run_writes_manifest_without_running_profiles(tmp_path) -> None:
-    exit_code = suite.main([
-        "--dry-run",
-        "--run-id",
-        "dry-run",
-        "--output-dir",
-        str(tmp_path),
-        "--profiles",
-        "long4h",
-        "ui10",
-    ])
+    exit_code = suite.main(
+        [
+            "--dry-run",
+            "--run-id",
+            "dry-run",
+            "--output-dir",
+            str(tmp_path),
+            "--profiles",
+            "long4h",
+            "ui10",
+        ]
+    )
 
     manifest_path = tmp_path / "dry-run" / "stability_soak_suite.json"
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -132,28 +153,37 @@ def test_soak_suite_profile_thresholds_capture_long_run_evidence_limits() -> Non
     assert thresholds["max_active_threads"] == 40
     assert thresholds["max_memory_growth_mb"] == 256.0
     assert thresholds["max_cpu_percent"] == 70.0
+    assert thresholds["max_pending_ping_count"] == 28
+    assert thresholds["max_same_target_overlap"] == 1
+    assert thresholds["max_cadence_grid_drift_seconds"] == 0.45
+    assert thresholds["max_cadence_start_gap_seconds"] == 2.0
+    assert thresholds["max_process_handle_growth"] == 256
 
 
 def test_soak_suite_validate_only_rejects_dry_run_manifest(tmp_path) -> None:
-    suite.main([
-        "--dry-run",
-        "--run-id",
-        "dry-run",
-        "--output-dir",
-        str(tmp_path),
-        "--profiles",
-        "long4h",
-    ])
+    suite.main(
+        [
+            "--dry-run",
+            "--run-id",
+            "dry-run",
+            "--output-dir",
+            str(tmp_path),
+            "--profiles",
+            "long4h",
+        ]
+    )
 
-    exit_code = suite.main([
-        "--validate-only",
-        "--run-id",
-        "dry-run",
-        "--output-dir",
-        str(tmp_path),
-        "--profiles",
-        "long4h",
-    ])
+    exit_code = suite.main(
+        [
+            "--validate-only",
+            "--run-id",
+            "dry-run",
+            "--output-dir",
+            str(tmp_path),
+            "--profiles",
+            "long4h",
+        ]
+    )
 
     assert exit_code == 1
 
@@ -289,16 +319,21 @@ def test_soak_suite_evidence_report_summarizes_thresholds_and_checks(tmp_path) -
     assert profile_report["thresholds"]["minimum_duration_seconds"] == 4.75
     assert profile_report["measurements"]["session_log_rows"] == 205
     assert profile_report["measurements"]["session_log_row_delta"] == 5
-    assert profile_report["checks"] == {
-        "duration_ok": True,
-        "ui_gap_ok": True,
-        "ui_processing_ok": True,
-        "thread_final_ok": True,
-        "thread_peak_ok": True,
-        "memory_growth_ok": True,
-        "session_log_ok": True,
-        "session_log_delta_ok": True,
-    }
+    assert profile_report["measurements"]["cadence_max_abs_grid_drift_seconds"] == 0.05
+    assert profile_report["measurements"]["max_same_target_overlap"] == 1
+    assert profile_report["measurements"]["session_resume_verified"] is True
+    assert profile_report["checks"]["evidence_schema_ok"] is True
+    assert profile_report["checks"]["duration_ok"] is True
+    assert profile_report["checks"]["pending_ping_ok"] is True
+    assert profile_report["checks"]["cadence_drift_ok"] is True
+    assert profile_report["checks"]["cadence_gap_ok"] is True
+    assert profile_report["checks"]["same_target_overlap_ok"] is True
+    assert profile_report["checks"]["process_handles_ok"] is None
+    assert profile_report["checks"]["session_resume_ok"] is True
+    assert profile_report["checks"]["session_loader_ownership_ok"] is True
+    assert profile_report["checks"]["clean_shutdown_ok"] is True
+    assert profile_report["checks"]["session_log_ok"] is True
+    assert profile_report["checks"]["session_log_delta_ok"] is True
 
 
 def test_soak_suite_validate_only_can_print_evidence_report(tmp_path, capsys) -> None:
@@ -326,18 +361,20 @@ def test_soak_suite_validate_only_can_print_evidence_report(tmp_path, capsys) ->
     )
 
     report_path = run_root / "stability_soak_evidence.json"
-    exit_code = suite.main([
-        "--validate-only",
-        "--evidence-report",
-        "--evidence-report-path",
-        str(report_path),
-        "--run-id",
-        "validate-report",
-        "--output-dir",
-        str(tmp_path),
-        "--profiles",
-        "release",
-    ])
+    exit_code = suite.main(
+        [
+            "--validate-only",
+            "--evidence-report",
+            "--evidence-report-path",
+            str(report_path),
+            "--run-id",
+            "validate-report",
+            "--output-dir",
+            str(tmp_path),
+            "--profiles",
+            "release",
+        ]
+    )
     captured = capsys.readouterr()
     report = json.loads(captured.out)
 
@@ -359,10 +396,7 @@ def test_soak_suite_validate_accepts_downloaded_artifact_paths(tmp_path) -> None
     )
     manifest_path = run_root / "stability_soak_suite.json"
     runner_summary_path = (
-        Path("C:/runner/work/ping/ping/artifacts/stability_soak_suite")
-        / run_id
-        / "release"
-        / summary_path.name
+        Path("C:/runner/work/ping/ping/artifacts/stability_soak_suite") / run_id / "release" / summary_path.name
     )
     suite.write_manifest(
         manifest_path,
@@ -401,7 +435,7 @@ def test_soak_suite_validate_rejects_session_log_row_loss() -> None:
 def test_soak_suite_validate_rejects_missing_stability_fields() -> None:
     failures = suite.validate_summary("release", {"profile": "release", "duration_seconds": 5.0})
 
-    assert any("summary is missing or has invalid stability fields" in failure for failure in failures)
+    assert any("required evidence fields missing" in failure for failure in failures)
 
 
 def test_soak_suite_resume_reuses_existing_passed_profile(tmp_path, monkeypatch) -> None:
@@ -432,15 +466,17 @@ def test_soak_suite_resume_reuses_existing_passed_profile(tmp_path, monkeypatch)
 
     monkeypatch.setattr(suite, "run_profile", fail_if_called)
 
-    exit_code = suite.main([
-        "--resume",
-        "--run-id",
-        "resume-run",
-        "--output-dir",
-        str(tmp_path),
-        "--profiles",
-        "release",
-    ])
+    exit_code = suite.main(
+        [
+            "--resume",
+            "--run-id",
+            "resume-run",
+            "--output-dir",
+            str(tmp_path),
+            "--profiles",
+            "release",
+        ]
+    )
 
     assert exit_code == 0
 
@@ -577,15 +613,21 @@ def test_manual_stability_soak_workflow_is_manual_only() -> None:
     assert "\n  push:" not in text
     assert "\n  schedule:" not in text
     assert "self-hosted-windows" in text
-    assert "actions/upload-artifact@v4" in text
+    assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1" in text
     assert "--override-duration-seconds" in text
-    assert "Min Duration" in text
-    assert "UI Gap Limit" in text
-    assert "Session Delta" in text
-    assert "Thread Limit" in text
-    assert "Memory Limit MB" in text
+    assert "fixed-duration evidence profiles and cannot use an override" in text
+    assert "Cadence Drift" in text
+    assert "Overlap" in text
+    assert "Pending" in text
+    assert "Handles Growth" in text
+    assert "Resume" in text
+    assert "Loader Ownership" in text
+    assert "Memory Growth" in text
     assert "--evidence-report" in text
     assert "stability_soak_evidence.json" in text
+    assert text.count('throw "stability soak evidence gate failed"') == 2
+    assert "Join-Path (Split-Path $manifest -Parent) $result.summary_json" in text
+    assert text.count("if: always()") >= 4
 
 
 def test_manual_stability_soak_blocks_long_profiles_on_github_hosted_windows() -> None:
@@ -610,8 +652,11 @@ def _summary(
     interval_seconds = int(profile_defaults["interval_seconds"])
     expected_updates = max(int(float(profile_defaults["duration_seconds"]) // max(interval_seconds, 1)), 1)
     rows = ping_results if session_log_rows is None else session_log_rows
+    cadence_targets = max(round(int(profile_defaults["targets"]) * (1 - float(profile_defaults["timeout_ratio"]))), 1)
     return {
+        "evidence_schema_version": 2,
         "profile": profile,
+        "platform": "posix",
         "targets": profile_defaults["targets"],
         "timeout_ratio": profile_defaults["timeout_ratio"],
         "duration_seconds": duration_seconds,
@@ -627,6 +672,7 @@ def _summary(
         "traceroute_calls": max(int(float(profile_defaults["duration_seconds"]) // 30.0), 1),
         "active_threads_final": 1,
         "max_active_threads": min(int(profile_defaults["max_active_threads"]), 24),
+        "max_active_ping_count": 20,
         "cpu_percent": 1.0,
         "memory_growth_bytes": 1024,
         "max_update_gap_seconds": 1.0,
@@ -637,4 +683,15 @@ def _summary(
         "max_pending_ping_count": 0,
         "max_log_queue_depth": 1,
         "max_backoff_target_count": 1,
+        "cadence_target_count": cadence_targets,
+        "cadence_probe_starts": cadence_targets * expected_updates,
+        "cadence_max_abs_grid_drift_seconds": 0.05,
+        "cadence_max_start_gap_seconds": 1.05,
+        "cadence_avg_start_gap_seconds": 1.0,
+        "max_same_target_overlap": 1,
+        "session_resume_verified": True,
+        "session_loader_wait_completed": True,
+        "session_loader_reserved_before_cleanup": True,
+        "session_loader_released_after_cleanup": True,
+        "session_lifecycle_errors": [],
     }

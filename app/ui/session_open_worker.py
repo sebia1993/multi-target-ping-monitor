@@ -22,7 +22,6 @@ from app.storage.session_log import (
 )
 from app.utils.diagnostics import operation_failure
 
-
 SESSION_OPEN_FAILED_CODE = "SESSION_OPEN_FAILED"
 SESSION_OPEN_RECENT_OBSERVATION_LIMIT = 25_000
 
@@ -53,6 +52,11 @@ class SessionOpenWorker(QThread):
 
     def run(self) -> None:
         try:
+            if self.record.sample_path.is_dir():
+                # Windows reports this as PermissionError while POSIX commonly
+                # raises IsADirectoryError. Normalize the public diagnostic so
+                # session-open failures stay stable across supported runners.
+                raise PermissionError("session sample path points to a directory")
             snapshot_builder = FocusSnapshotBuilder()
             bounds: list[datetime | None] = [None, None]
             observations, summary = read_observations_with_summary(
@@ -126,10 +130,7 @@ class SessionOpenWorker(QThread):
         if summary.skipped_rows:
             files = ", ".join(path.name for path in summary.skipped_row_files[:3])
             suffix = f"; files={files}" if files else ""
-            last_error = (
-                f"{SESSION_RECOVERED_WITH_SKIPPED_ROWS_CODE}: "
-                f"skipped_rows={summary.skipped_rows}{suffix}"
-            )
+            last_error = f"{SESSION_RECOVERED_WITH_SKIPPED_ROWS_CODE}: skipped_rows={summary.skipped_rows}{suffix}"
         return replace(
             self.record,
             start=min(self.record.start, first_timestamp) if first_timestamp is not None else self.record.start,

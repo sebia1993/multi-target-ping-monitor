@@ -88,7 +88,7 @@ MultiPingCheck는 Windows에서 여러 IPv4 대상의 지연·손실을 장시�
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+python -m pip install --require-hashes -r requirements-dev.lock
 ```
 
 빠른 테스트:
@@ -96,6 +96,8 @@ python -m pip install -r requirements.txt
 ```powershell
 python -m pytest -q
 ```
+
+CI의 전체 저장소 Ruff gate는 기존 코드 전체를 한 번에 재작성하지 않도록 실제 실행 오류에 해당하는 `E9`, `F63`, `F7`, `F82`를 차단합니다. 이번 버전에서 새로 만들거나 변경한 Python 파일은 여기에 더해 `ruff format --check`와 import ordering(`I`)도 통과해야 합니다. 이후 변경 범위가 넓어질 때 이 quality boundary를 함께 확장합니다.
 
 Release 기준 전체 검증:
 
@@ -164,10 +166,11 @@ Windows Release는 main에서 수동 workflow로 수행합니다.
 
 Release 전에 다음을 확인합니다.
 
-- Source verifier 성공
-- Windows EXE build 성공
-- Packaged EXE smoke 성공
-- ZIP/SHA-256 생성
+- `Quality, tests, and security` 성공
+- `Windows package validation` 성공
+- `long4h` 14,400초 evidence gate 성공
+- ZIP/SHA-256/CycloneDX SBOM 생성과 독립 verifier 성공
+- Build provenance와 SBOM attestation 생성
 - 기준 commit/tag 추적 가능
 - 실제 운영정보가 package/notes에 없음
 
