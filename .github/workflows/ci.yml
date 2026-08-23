@@ -130,6 +130,14 @@ jobs:
         shell: pwsh
         run: python scripts\verify_release.py --exe
 
+      - name: Verify detached release packaging
+        shell: pwsh
+        run: |
+          git checkout --detach $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { throw "failed to enter detached checkout test state" }
+          .\scripts\publish_release.ps1 -SkipUpload -SkipBuild
+          if ($LASTEXITCODE -ne 0) { throw "detached release packaging failed" }
+
       - name: Generate reproducible runtime SBOM
         shell: pwsh
         run: |
@@ -159,4 +167,5 @@ jobs:
             build/**
             dist/**
             artifacts/**
+            release/**
           if-no-files-found: ignore

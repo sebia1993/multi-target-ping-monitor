@@ -248,8 +248,24 @@ def test_publish_release_notes_include_traceable_zip_metadata() -> None:
     assert "IPv4 주소는 한 줄에 하나씩" in text
     assert "APP_STARTUP_FAILED 또는 APP_UNEXPECTED_ERROR" in text
     assert "%LOCALAPPDATA%\\MultiPingCheck\\logs\\multipingcheck.log" in text
+    assert "- 기준 커밋: $Head" in text
+    assert "source_commit = $Head" in text
     assert '"--manifest", $ManifestItem.FullName' in text
     assert '"--expected-source-commit", $Head' in text
+
+
+def test_publish_release_allows_detached_packaging_but_rejects_detached_upload() -> None:
+    text = (Path(__file__).resolve().parents[1] / "scripts" / "publish_release.ps1").read_text(encoding="utf-8-sig")
+
+    detached_check = '$DetachedHead = $Branch -eq "HEAD"'
+    upload_gate = "if ($DetachedHead -and -not $SkipUpload) {"
+    packaging_label = '$Branch = "detached"'
+    assert detached_check in text
+    assert upload_gate in text
+    assert packaging_label in text
+    assert text.index(detached_check) < text.index(upload_gate) < text.index(packaging_label)
+    assert 'if ($LASTEXITCODE -ne 0 -or -not $Branch -or $Branch -eq "HEAD")' not in text
+    assert 'Invoke-Checked "git" @("push", "origin", $Branch)' in text
 
 
 def test_release_windows_workflow_matches_publish_contract() -> None:
@@ -265,7 +281,15 @@ def test_release_windows_workflow_matches_publish_contract() -> None:
     assert "attestations: write" in text
     assert "runs-on: windows-latest" in text
     assert "fetch-depth: 0" in text
-    assert 'github.ref_name }}" -ne "main"' in text
+    assert '$env:GITHUB_REF -ne "refs/heads/main"' in text
+    assert "github.ref_name" not in text
+    assert "${{ github.ref }}" not in text
+    assert "ref: ${{ github.sha }}" in text
+    assert "ref: main" not in text
+    assert "$expectedSha = $env:GITHUB_SHA.Trim().ToLowerInvariant()" in text
+    assert "$actualSha = (git rev-parse HEAD).Trim().ToLowerInvariant()" in text
+    assert "if ($actualSha -ne $expectedSha)" in text
+    assert "Release source mismatch" in text
     assert "GH_TOKEN: ${{ github.token }}" in text
     assert 'version = (python -c "from app import __version__' in text
     assert 'if (-not $releaseTitle) { $releaseTitle = "MultiPingCheck $expectedTag" }' in text
@@ -325,6 +349,8 @@ def test_ci_workflow_consolidates_quality_and_windows_package_checks() -> None:
     assert "python scripts\\verify_release.py" in ci
     assert "build_windows_exe.ps1" in ci
     assert "python scripts\\verify_release.py --exe" in ci
+    assert "git checkout --detach $env:GITHUB_SHA" in ci
+    assert ".\\scripts\\publish_release.ps1 -SkipUpload -SkipBuild" in ci
     assert "cyclonedx-py requirements requirements.lock" in ci
     assert not (root / "windows-fast-check.yml").exists()
     assert not (root / "windows-release-verify.yml").exists()
