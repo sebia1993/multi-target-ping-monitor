@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.storage.atomic_write import atomic_write_path, read_text_with_retries
-from scripts.soak_test import SOAK_PROFILES, evaluate_summary
+from scripts.soak_test import EVIDENCE_SCHEMA_VERSION, SOAK_PROFILES, evaluate_summary, minimum_probe_starts_per_target
 from scripts.soak_test import parse_args as parse_soak_args
 
 DEFAULT_PROFILES = ("long4h", "long8h", "long24h", "ui10", "ui20", "ui50")
@@ -240,6 +240,10 @@ def profile_thresholds(profile: str) -> dict[str, object]:
         "max_active_threads": int(defaults["max_active_threads"]),
         "max_pending_ping_count": min(targets, 20) + 8,
         "max_same_target_overlap": 1,
+        "min_probe_starts_per_target": minimum_probe_starts_per_target(
+            duration_seconds=expected_duration_seconds,
+            interval_seconds=float(interval_seconds),
+        ),
         "max_cadence_grid_drift_seconds": max(float(interval_seconds) * 0.45, 0.05),
         "max_cadence_start_gap_seconds": max(float(interval_seconds) * 1.5, 2.0),
         "max_process_handle_growth": 256,
@@ -453,6 +457,17 @@ def _evidence_measurements(result: dict[str, Any], summary: dict[str, Any]) -> d
         "process_handle_count_final": _first_present_number(result, summary, key="process_handle_count_final"),
         "max_process_handle_count": _first_present_number(result, summary, key="max_process_handle_count"),
         "process_handle_growth": _first_present_number(result, summary, key="process_handle_growth"),
+        "probe_target_count": _first_present_number(result, summary, key="probe_target_count"),
+        "probe_min_starts_per_target": _first_present_number(
+            result,
+            summary,
+            key="probe_min_starts_per_target",
+        ),
+        "probe_max_starts_per_target": _first_present_number(
+            result,
+            summary,
+            key="probe_max_starts_per_target",
+        ),
         "cadence_target_count": _first_present_number(result, summary, key="cadence_target_count"),
         "cadence_probe_starts": _first_present_number(result, summary, key="cadence_probe_starts"),
         "cadence_max_abs_grid_drift_seconds": _first_present_number(
@@ -492,7 +507,7 @@ def _evidence_checks(measurements: dict[str, object], thresholds: dict[str, obje
     memory_limit_mb = _number(thresholds.get("max_memory_growth_mb"))
     memory_limit_bytes = None if memory_limit_mb is None else memory_limit_mb * 1024 * 1024
     return {
-        "evidence_schema_ok": _equal(measurements.get("evidence_schema_version"), 2),
+        "evidence_schema_ok": _equal(measurements.get("evidence_schema_version"), EVIDENCE_SCHEMA_VERSION),
         "duration_ok": _greater_equal(
             measurements.get("duration_seconds"),
             thresholds.get("minimum_duration_seconds"),
@@ -522,6 +537,18 @@ def _evidence_checks(measurements: dict[str, object], thresholds: dict[str, obje
             thresholds.get("max_pending_ping_count"),
         ),
         "memory_growth_ok": _less_equal(measurements.get("memory_growth_bytes"), memory_limit_bytes),
+        "probe_target_coverage_ok": _greater_equal(
+            measurements.get("probe_target_count"),
+            thresholds.get("targets"),
+        ),
+        "probe_min_starts_ok": _greater_equal(
+            measurements.get("probe_min_starts_per_target"),
+            thresholds.get("min_probe_starts_per_target"),
+        ),
+        "probe_start_bounds_ok": _greater_equal(
+            measurements.get("probe_max_starts_per_target"),
+            measurements.get("probe_min_starts_per_target"),
+        ),
         "cadence_recorded": _greater_equal(measurements.get("cadence_target_count"), 1),
         "cadence_drift_ok": _less_equal(
             measurements.get("cadence_max_abs_grid_drift_seconds"),

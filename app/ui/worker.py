@@ -34,7 +34,7 @@ from app.core.alerts import (
 )
 from app.core.analyzer import analyze_path
 from app.core.metrics import MetricsSession, TargetMetricTracker
-from app.core.models import STATUS_ERROR, STATUS_PAUSED, STATUS_TIMEOUT, HopInfo, HopObservation, PingResult
+from app.core.models import STATUS_ERROR, STATUS_OK, STATUS_PAUSED, STATUS_TIMEOUT, HopInfo, HopObservation, PingResult
 from app.core.ping_runner import CommandPingRunner, TcpConnectRunner
 from app.core.probes import PingProbeFactory, TracerouteProbe
 from app.core.route_history import RouteHistory
@@ -78,6 +78,19 @@ AUTO_FULL_ROUTE_ALERT_KEYS = {
     TIMER_ALERT_KEY,
     MOS_ALERT_KEY,
 }
+
+
+def _advance_periodic_due(current_due: float, interval_seconds: float, now: float) -> float:
+    """Advance one periodic deadline to its first future slot without completion drift."""
+
+    if interval_seconds <= 0:
+        return now
+    if current_due > now:
+        return current_due
+    missed_slots = math.floor((now - current_due) / interval_seconds) + 1
+    return current_due + missed_slots * interval_seconds
+
+
 PROBE_ENGINE_ICMP = "icmp"
 PROBE_ENGINE_TCP_CONNECT = "tcp_connect"
 PROBE_ENGINES = {PROBE_ENGINE_ICMP, PROBE_ENGINE_TCP_CONNECT}
@@ -159,7 +172,7 @@ class TargetProbeState:
             self.skipped_slot_count += skipped
         return effective_interval <= 0 or now >= self.next_due
 
-    def mark_started(self, now: float) -> None:
+    def mark_started(self, now: float) -> float:
         """Reserve the currently due slot before submitting the Future."""
 
         scheduled_due = self.next_due if self.current_interval_seconds > 0 else now
@@ -170,6 +183,7 @@ class TargetProbeState:
             self.max_start_lateness_seconds,
             max(now - scheduled_due, 0.0),
         )
+        return scheduled_due
 
     def record_result(self, result: PingResult, base_interval_seconds: float, now: float) -> None:
         self.last_status = result.status
@@ -473,6 +487,7 @@ class MeasurementWorker(QThread):
         auto_restore_final_hop_on_recovery: bool = False,
         parent=None,
         session_log_root: str | Path | None = None,
+        probe_schedule_observer: Callable[[str, float, float, float], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.target = target.strip()
@@ -491,6 +506,7 @@ class MeasurementWorker(QThread):
         self.auto_full_route_on_alert = bool(auto_full_route_on_alert)
         self.auto_restore_final_hop_on_recovery = bool(auto_restore_final_hop_on_recovery)
         self.session_log_root = Path(session_log_root) if session_log_root is not None else None
+        self._probe_schedule_observer = probe_schedule_observer
         self.resumed_from_session_id = ""
         # 아래 값들은 UI 버튼에서 들어오는 중지/일시정지/간격 변경 요청을 안전하게 반영하기 위한 상태입니다.
         self._stop_event = threading.Event()
@@ -698,7 +714,6 @@ class MeasurementWorker(QThread):
                 )
                 if trace_future is not None and trace_future.done():
                     trace_future = None
-                    next_trace_refresh_due = time.monotonic() + TRACE_REFRESH_SECONDS
                 scheduled_targets = self._schedule_target_pings(
                     target_executor,
                     target_futures,
@@ -736,10 +751,18 @@ class MeasurementWorker(QThread):
                         recent_observations,
                         timeout=self._next_poll_timeout(round_deadline),
                     )
+                    scheduled_targets.update(
+                        self._schedule_target_pings(
+                            target_executor,
+                            target_futures,
+                            active_target_pings,
+                            target_states,
+                            excluded_targets=scheduled_targets,
+                        )
+                    )
                     metrics, hops = self._refresh_trace_result(metrics, hops, trace_future, route_log)
                     if trace_future is not None and trace_future.done():
                         trace_future = None
-                        next_trace_refresh_due = time.monotonic() + TRACE_REFRESH_SECONDS
                     self._schedule_hop_pings(
                         hop_executor,
                         hop_futures,
@@ -775,11 +798,14 @@ class MeasurementWorker(QThread):
                     recent_observations,
                     timeout=0,
                 )
+                previous_trace_future = trace_future
                 trace_future = self._maybe_adjust_route_for_alerts(
                     trace_executor,
                     trace_future,
                     target_trackers,
                 )
+                if previous_trace_future is None and trace_future is not None:
+                    next_trace_refresh_due = time.monotonic() + TRACE_REFRESH_SECONDS
                 self._emit_measurement_update(metrics, target_trackers, recent_observations)
                 loop_delays.append(max(time.monotonic() - round_started_at - max(self.interval_seconds, 0), 0.0))
                 self._emit_diagnostics(
@@ -805,6 +831,11 @@ class MeasurementWorker(QThread):
 
                 if self._uses_full_route() and trace_future is None and time.monotonic() >= next_trace_refresh_due:
                     trace_future = self._start_trace_refresh(trace_executor)
+                    next_trace_refresh_due = _advance_periodic_due(
+                        next_trace_refresh_due,
+                        TRACE_REFRESH_SECONDS,
+                        time.monotonic(),
+                    )
 
                 self._sleep_until_next_round(
                     round_started_at,
@@ -976,32 +1007,70 @@ class MeasurementWorker(QThread):
         target_states: dict[str, TargetProbeState],
         *,
         now: float | None = None,
+        excluded_targets: set[str] | None = None,
     ) -> set[str]:
         scheduled: set[str] = set()
+        if self._stop_event.is_set():
+            return scheduled
         now = time.monotonic() if now is None else now
-        capacity = max(min(len(self.targets), MAX_TARGET_PING_WORKERS) - len(active_targets), 0)
+        excluded_targets = excluded_targets or set()
+        worker_limit = min(len(self.targets), MAX_TARGET_PING_WORKERS)
+        capacity = max(worker_limit - len(active_targets), 0)
         if capacity == 0:
             return scheduled
         # 여러 IP를 한 번에 전부 실행하면 timeout이 많은 환경에서 스레드가 급격히 늘 수 있습니다.
         # capacity만큼만 새 ping을 예약해서 프로그램 반응성과 시스템 부하를 같이 지킵니다.
         targets = list(self.targets)
         start_index = self._target_schedule_cursor % len(targets)
-        for offset in range(len(targets)):
-            target_index = (start_index + offset) % len(targets)
-            target = targets[target_index]
+        rotated_targets = [
+            ((start_index + offset) % len(targets), targets[(start_index + offset) % len(targets)])
+            for offset in range(len(targets))
+        ]
+        # 성공 응답이 확인된 대상을 먼저 예약하고, 아직 결과가 없는 대상과 실패 대상을
+        # 그 뒤에 둡니다. 같은 우선순위 안에서는 cursor 순서를 유지해 특정 IP를 편애하지 않습니다.
+        rotated_targets.sort(
+            key=lambda item: (
+                target_states[item[1]].last_status != STATUS_OK,
+                target_states[item[1]].consecutive_failures > 0,
+            )
+        )
+        responsive_targets = sum(
+            1
+            for target in targets
+            if not self._is_target_paused(target) and target_states[target].last_status == STATUS_OK
+        )
+        responsive_reserve = min(responsive_targets, max(worker_limit // 4, 1)) if worker_limit else 0
+        nonresponsive_capacity = max(worker_limit - responsive_reserve, 0)
+        active_nonresponsive = sum(
+            1
+            for target in active_targets
+            if (state := target_states.get(target)) is None or state.last_status != STATUS_OK
+        )
+        for target_index, target in rotated_targets:
             if self._is_target_paused(target):
                 continue
             state = target_states[target]
             if target in active_targets:
                 continue
+            # 한 outer cycle에서는 대상별로 한 번만 예약합니다. 빠른 Future가
+            # inner refill 중 끝나도 cycle 경계와 max_cycles 의미를 바꾸지 않습니다.
+            if target in excluded_targets:
+                continue
             interval_seconds = self._target_base_interval_seconds(target)
+            is_nonresponsive = state.last_status != STATUS_OK
+            if is_nonresponsive and active_nonresponsive >= nonresponsive_capacity:
+                continue
             if not state.is_due(interval_seconds, now):
                 continue
-            state.mark_started(now)
+            scheduled_due = state.mark_started(now)
+            if self._probe_schedule_observer is not None:
+                self._probe_schedule_observer(target, scheduled_due, now, state.current_interval_seconds)
             future = executor.submit(self._ping_target, target)
             futures[future] = state
             active_targets.add(target)
             scheduled.add(target)
+            if is_nonresponsive:
+                active_nonresponsive += 1
             self._target_schedule_cursor = (target_index + 1) % len(targets)
             capacity -= 1
             if capacity == 0:

@@ -9,13 +9,16 @@
 - 단일 버전 원본(`app.__version__`)과 `v0.2.0` Release 계약
 - runtime/dev 의존성의 SHA-256 hash lock
 - CycloneDX 1.6 SBOM, ZIP checksum, release manifest, GitHub build/SBOM attestation
-- cadence grid drift, missed slot, 동일 대상 overlap, Windows handle, 세션 resume/loader ownership 증거
+- due 대비 submit lateness, 실제 probe 시작 gap, 대상별 coverage, 동일 대상 overlap, Windows handle, 세션 resume/loader ownership 증거
 - MIT License와 비전문가용 검증·보안 경계
 
 ### 변경
 
 - 대상 측정 주기를 ping 완료 시각 기준에서 예정 due-time 기준으로 변경
 - 늦어진 측정은 누락 slot을 한 번에 몰아 실행하지 않고 다음 미래 slot으로 전진
+- timeout이 많은 경우에도 확인된 정상 대상을 먼저 실행하고, 미확인·실패 작업이 공용 executor를 모두 점유하지 않도록 bounded capacity를 예약
+- tracert 갱신 주기를 완료 시각이 아니라 고정 due-time 기준으로 전진해 장시간 누적 drift와 종료 경계 누락 방지
+- 장시간 증거를 schema v3로 올리고 모든 대상의 실제 probe 시작 횟수를 80% slow-backoff floor로 fail-closed 검증
 - PR/main 검증을 `CI` workflow의 Linux quality/security와 Windows package gate로 통합
 - GitHub-hosted Windows에서 실제 14,400초 `long4h` soak를 실행할 수 있도록 증거 schema 강화
 - Release가 실행 대기 중 바뀐 `main`을 따라가지 않도록 dispatch 시점의 정확한 commit SHA로 checkout 고정

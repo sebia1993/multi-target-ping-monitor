@@ -4,6 +4,7 @@ import argparse
 import csv
 import ctypes
 import json
+import math
 import os
 import statistics
 import sys
@@ -26,6 +27,7 @@ from app.storage.session_log import iter_observations, session_log_segment_index
 from app.ui.session_observation_loader import SessionObservationLoader
 from app.ui.worker import (
     MEASUREMENT_MODE_FINAL_HOP_ONLY,
+    SLOW_BACKOFF_SECONDS,
     TRACE_REFRESH_SECONDS,
     MeasurementWorker,
 )
@@ -33,7 +35,8 @@ from app.ui.worker import (
 # soak test는 "오래 돌려도 멈추지 않는지" 보는 안정성 테스트입니다.
 # 실제 IP를 때리지 않고 가짜 ping 응답을 만들어, timeout이 많은 환경을 안전하게 재현합니다.
 TOP_EVENT_SAMPLE_LIMIT = 10
-EVIDENCE_SCHEMA_VERSION = 2
+EVIDENCE_SCHEMA_VERSION = 3
+MIN_PROBE_COVERAGE_RATIO = 0.8
 FIXED_DURATION_PROFILES = frozenset({"long4h", "long8h", "long24h"})
 
 
@@ -43,7 +46,7 @@ class ProbeCadenceEvidence:
 
     interval_seconds: float
     lock: threading.Lock = field(default_factory=threading.Lock)
-    anchors: dict[str, float] = field(default_factory=dict)
+    scheduled_due_anchors: dict[str, float] = field(default_factory=dict)
     previous_starts: dict[str, float] = field(default_factory=dict)
     call_counts: dict[str, int] = field(default_factory=dict)
     active_calls: dict[str, int] = field(default_factory=dict)
@@ -53,16 +56,38 @@ class ProbeCadenceEvidence:
     total_start_gap_seconds: float = 0.0
     start_gap_count: int = 0
 
-    def started(self, target: str, *, include_in_cadence: bool) -> None:
-        now = time.monotonic()
+    def scheduled(
+        self,
+        target: str,
+        *,
+        scheduled_due: float,
+        started_at: float,
+        interval_seconds: float,
+        include_in_cadence: bool,
+    ) -> None:
+        """Record the worker's due slot and submit time before executor hand-off."""
+
+        if not include_in_cadence or interval_seconds <= 0:
+            return
+        with self.lock:
+            self.scheduled_due_anchors.setdefault(target, scheduled_due)
+            # nearest-slot round는 실제 지연을 다음 slot 쪽으로 접어 interval/2
+            # 이하로 숨깁니다. Worker가 선택한 현재 due에 대한 submit lateness를
+            # 직접 재면 missed slot 전체 지연과 scheduler starvation이 보존됩니다.
+            self.max_abs_grid_drift_seconds = max(
+                self.max_abs_grid_drift_seconds,
+                max(started_at - scheduled_due, 0.0),
+            )
+
+    def started(self, target: str, *, started_at: float | None = None) -> None:
+        now = time.monotonic() if started_at is None else started_at
         with self.lock:
             active = self.active_calls.get(target, 0) + 1
             self.active_calls[target] = active
             self.max_same_target_overlap = max(self.max_same_target_overlap, active)
             self.call_counts[target] = self.call_counts.get(target, 0) + 1
-            if not include_in_cadence or self.interval_seconds <= 0:
+            if target not in self.scheduled_due_anchors:
                 return
-            anchor = self.anchors.setdefault(target, now)
             previous = self.previous_starts.get(target)
             self.previous_starts[target] = now
             if previous is not None:
@@ -70,12 +95,6 @@ class ProbeCadenceEvidence:
                 self.max_start_gap_seconds = max(self.max_start_gap_seconds, gap)
                 self.total_start_gap_seconds += gap
                 self.start_gap_count += 1
-            slot = round((now - anchor) / self.interval_seconds)
-            grid_time = anchor + slot * self.interval_seconds
-            self.max_abs_grid_drift_seconds = max(
-                self.max_abs_grid_drift_seconds,
-                abs(now - grid_time),
-            )
 
     def finished(self, target: str) -> None:
         with self.lock:
@@ -83,9 +102,13 @@ class ProbeCadenceEvidence:
 
     def summary(self) -> dict[str, int | float]:
         with self.lock:
-            cadence_targets = len(self.anchors)
-            cadence_calls = sum(self.call_counts.get(target, 0) for target in self.anchors)
+            cadence_targets = len(self.scheduled_due_anchors)
+            cadence_calls = sum(self.call_counts.get(target, 0) for target in self.scheduled_due_anchors)
+            observed_call_counts = list(self.call_counts.values())
             return {
+                "probe_target_count": len(observed_call_counts),
+                "probe_min_starts_per_target": min(observed_call_counts, default=0),
+                "probe_max_starts_per_target": max(observed_call_counts, default=0),
                 "cadence_target_count": cadence_targets,
                 "cadence_probe_starts": cadence_calls,
                 "cadence_max_abs_grid_drift_seconds": self.max_abs_grid_drift_seconds,
@@ -388,6 +411,21 @@ def main() -> int:
     traceroute_probe = StableTracerouteProbe()
     cadence_evidence = ProbeCadenceEvidence(float(args.interval_seconds))
 
+    def observe_probe_schedule(
+        target: str,
+        scheduled_due: float,
+        started_at: float,
+        interval_seconds: float,
+    ) -> None:
+        target_index = int(target.rsplit(".", 1)[1])
+        cadence_evidence.scheduled(
+            target,
+            scheduled_due=scheduled_due,
+            started_at=started_at,
+            interval_seconds=interval_seconds,
+            include_in_cadence=target_index < timeout_start_index,
+        )
+
     def ping_factory(timeout_ms: int) -> SimulatedPingRunner:
         return SimulatedPingRunner(
             timeout_ms=timeout_ms,
@@ -409,6 +447,7 @@ def main() -> int:
         ping_probe_factory=ping_factory,
         traceroute_probe=traceroute_probe,
         session_log_root=args.session_log_root,
+        probe_schedule_observer=observe_probe_schedule,
     )
     worker.measurement_updated.connect(lambda *_args: updates.append(time.monotonic()))
     worker.diagnostics_updated.connect(
@@ -683,7 +722,7 @@ class SimulatedPingRunner:
     def ping(self, target: str) -> PingResult:
         target_index = int(target.rsplit(".", 1)[1])
         is_timeout = target_index >= self.timeout_start_index
-        self.cadence_evidence.started(target, include_in_cadence=not is_timeout)
+        self.cadence_evidence.started(target)
         self._increment(self.calls, target)
         try:
             if is_timeout:
@@ -943,6 +982,9 @@ def evaluate_summary(summary: dict[str, Any], args: argparse.Namespace) -> list[
         "max_active_threads",
         "memory_growth_bytes",
         "cpu_percent",
+        "probe_target_count",
+        "probe_min_starts_per_target",
+        "probe_max_starts_per_target",
         "cadence_target_count",
         "cadence_probe_starts",
         "cadence_max_abs_grid_drift_seconds",
@@ -1027,6 +1069,22 @@ def evaluate_summary(summary: dict[str, Any], args: argparse.Namespace) -> list[
         failures.append(f"CPU usage too high: {summary['cpu_percent']:.1f}% > {args.max_cpu_percent:.1f}%")
     if int(summary["max_same_target_overlap"]) > 1:
         failures.append(f"same-target probe overlap detected: {summary['max_same_target_overlap']} > 1")
+    probe_target_count = int(summary["probe_target_count"])
+    if probe_target_count < args.targets:
+        failures.append(f"probe target coverage too low: {probe_target_count} < {args.targets}")
+    min_probe_starts = minimum_probe_starts_per_target(
+        duration_seconds=float(args.duration_seconds),
+        interval_seconds=float(args.interval_seconds),
+    )
+    if int(summary["probe_min_starts_per_target"]) < min_probe_starts:
+        failures.append(
+            f"per-target probe starts too low: {summary['probe_min_starts_per_target']} < {min_probe_starts}"
+        )
+    if int(summary["probe_max_starts_per_target"]) < int(summary["probe_min_starts_per_target"]):
+        failures.append(
+            "invalid per-target probe start bounds: "
+            f"{summary['probe_max_starts_per_target']} < {summary['probe_min_starts_per_target']}"
+        )
     cadence_target_count = int(summary["cadence_target_count"])
     if cadence_target_count < 1:
         failures.append("no healthy target cadence evidence was recorded")
@@ -1036,7 +1094,7 @@ def evaluate_summary(summary: dict[str, Any], args: argparse.Namespace) -> list[
     max_grid_drift = max(float(args.interval_seconds) * 0.45, 0.05)
     if float(summary["cadence_max_abs_grid_drift_seconds"]) > max_grid_drift:
         failures.append(
-            f"cadence grid drift too high: {summary['cadence_max_abs_grid_drift_seconds']} > {max_grid_drift}"
+            f"cadence due lateness too high: {summary['cadence_max_abs_grid_drift_seconds']} > {max_grid_drift}"
         )
     max_cadence_gap = max(float(args.interval_seconds) * 1.5, 2.0)
     if float(summary["cadence_max_start_gap_seconds"]) > max_cadence_gap:
@@ -1078,10 +1136,18 @@ def evaluate_summary(summary: dict[str, Any], args: argparse.Namespace) -> list[
     if require_backoff and summary["max_backoff_target_count"] < 1:
         failures.append("timeout backoff was not observed")
     if args.duration_seconds >= TRACE_REFRESH_SECONDS * 1.5:
-        expected_trace_calls = max(int(args.duration_seconds // TRACE_REFRESH_SECONDS), 1)
+        # t0의 초기 trace를 포함하고 종료 경계 자체의 새 trace는 요구하지 않습니다.
+        expected_trace_calls = max(math.ceil(args.duration_seconds / TRACE_REFRESH_SECONDS), 1)
         if summary["traceroute_calls"] < expected_trace_calls:
             failures.append(f"too few tracert refreshes: {summary['traceroute_calls']} < {expected_trace_calls}")
     return failures
+
+
+def minimum_probe_starts_per_target(*, duration_seconds: float, interval_seconds: float) -> int:
+    """Return a conservative per-target floor for healthy and slow-backoff probes."""
+
+    slowest_expected_interval = max(SLOW_BACKOFF_SECONDS, interval_seconds, 1.0)
+    return max(int((duration_seconds / slowest_expected_interval) * MIN_PROBE_COVERAGE_RATIO), 1)
 
 
 def max_int(rows: list[dict[str, object]], key: str) -> int:

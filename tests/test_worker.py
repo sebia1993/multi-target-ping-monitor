@@ -706,11 +706,118 @@ def test_target_probe_state_uses_due_time_instead_of_completion_time() -> None:
     result = PingResult("198.51.100.10", True, 10.0, STATUS_OK, datetime.now())
 
     assert state.is_due(1, now=100.0) is True
-    state.mark_started(100.0)
+    assert state.mark_started(100.0) == 100.0
     state.record_result(result, base_interval_seconds=1, now=100.4)
 
     assert state.next_due == 101.0
     assert state.next_due != pytest.approx(101.4)
+
+
+def test_periodic_trace_due_counts_t0_without_completion_drift() -> None:
+    next_due = 60.0
+    trace_calls = 1  # immediate t0 trace
+
+    for second in range(14_400):
+        if second < next_due:
+            continue
+        trace_calls += 1
+        next_due = worker_module._advance_periodic_due(next_due, 60.0, float(second))
+
+    assert trace_calls == 240
+    assert next_due == 14_400.0
+
+
+def test_scheduler_reserves_capacity_and_prioritizes_responsive_targets(monkeypatch) -> None:
+    monkeypatch.setattr(worker_module, "MAX_TARGET_PING_WORKERS", 20)
+    timeout_targets = [f"198.51.100.{index}" for index in range(1, 41)]
+    responsive_targets = [f"198.51.100.{index}" for index in range(41, 51)]
+    targets = timeout_targets + responsive_targets
+    observed: list[tuple[str, float, float, float]] = []
+    worker = MeasurementWorker(
+        targets[0],
+        interval_seconds=1,
+        max_cycles=None,
+        targets=targets,
+        probe_schedule_observer=lambda *event: observed.append(event),
+    )
+    states: dict[str, TargetProbeState] = {}
+    for target in targets:
+        state = TargetProbeState(target)
+        state.configured_interval_seconds = 1
+        state.current_interval_seconds = 1
+        state.next_due = 100.0 if target in timeout_targets else 101.0
+        if target in timeout_targets:
+            state.consecutive_failures = 3
+            state.current_interval_seconds = 2
+            state.last_status = STATUS_TIMEOUT
+        else:
+            state.last_status = STATUS_OK
+        states[target] = state
+
+    class PendingExecutor:
+        def __init__(self) -> None:
+            self.targets: list[str] = []
+
+        def submit(self, _callback, target: str) -> Future[PingResult]:
+            self.targets.append(target)
+            return Future()
+
+    executor = PendingExecutor()
+    active_targets = set(timeout_targets[:15])
+    futures: dict[Future[PingResult], TargetProbeState] = {}
+
+    # Five slots stay unused while only backoff targets are due. They are then
+    # immediately available for healthy/unknown targets at their next due slot.
+    assert worker._schedule_target_pings(executor, futures, active_targets, states, now=100.0) == set()
+    scheduled = worker._schedule_target_pings(executor, futures, active_targets, states, now=101.0)
+
+    assert len(scheduled) == 5
+    assert scheduled.issubset(responsive_targets)
+    assert len(active_targets.intersection(timeout_targets)) == 15
+    assert all(event[0] in responsive_targets for event in observed)
+
+
+def test_scheduler_does_not_resubmit_interval_zero_target_within_same_round() -> None:
+    target = "198.51.100.10"
+    worker = MeasurementWorker(
+        target,
+        interval_seconds=0,
+        max_cycles=1,
+        targets=[target],
+    )
+    state = TargetProbeState(target)
+
+    class PendingExecutor:
+        def submit(self, _callback, _target: str) -> Future[PingResult]:
+            return Future()
+
+    executor = PendingExecutor()
+    active_targets: set[str] = set()
+    futures: dict[Future[PingResult], TargetProbeState] = {}
+
+    scheduled = worker._schedule_target_pings(
+        executor,
+        futures,
+        active_targets,
+        {target: state},
+        now=100.0,
+    )
+    assert scheduled == {target}
+
+    # Simulate the fast future completing before the same round's inner refill.
+    active_targets.clear()
+    assert (
+        worker._schedule_target_pings(
+            executor,
+            futures,
+            active_targets,
+            {target: state},
+            now=100.1,
+            excluded_targets=scheduled,
+        )
+        == set()
+    )
+    assert state.scheduled_count == 1
 
 
 def test_target_probe_state_skips_missed_slots_without_burst() -> None:
@@ -800,7 +907,7 @@ def test_worker_rotates_limited_probe_capacity_across_all_targets(monkeypatch, t
     worker = MeasurementWorker(
         targets[0],
         interval_seconds=0,
-        max_cycles=3,
+        max_cycles=1,
         targets=targets,
         measurement_mode=MEASUREMENT_MODE_FINAL_HOP_ONLY,
         session_log_root=tmp_path,
@@ -810,6 +917,7 @@ def test_worker_rotates_limited_probe_capacity_across_all_targets(monkeypatch, t
     worker.run()
 
     assert {target for target, _timeout_ms in calls} == set(targets)
+    assert len(calls) == len(targets)
 
 
 def test_worker_stop_request_before_run_does_not_emit_trace(monkeypatch) -> None:
