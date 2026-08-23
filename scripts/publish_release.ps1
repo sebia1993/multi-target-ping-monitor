@@ -64,22 +64,13 @@ function Get-SafeFileToken {
     return ($Value -replace '[^A-Za-z0-9._-]', '_')
 }
 
-function Get-KstNow {
-    try {
-        $Kst = [System.TimeZoneInfo]::FindSystemTimeZoneById("Korea Standard Time")
-        return [System.TimeZoneInfo]::ConvertTimeFromUtc([System.DateTime]::UtcNow, $Kst)
-    }
-    catch {
-        return [System.DateTime]::UtcNow.AddHours(9)
-    }
-}
-
 $Root = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")
 Set-Location -LiteralPath $Root.Path
 
 # 배포에 필요한 기본 도구가 있는지 먼저 확인합니다.
 Require-Command "git" "Install Git for Windows and retry."
 Require-Command "python" "Install Python and retry."
+Require-Command "cyclonedx-py" "Install the hash-locked development dependencies and retry."
 $GhCommand = Resolve-CommandPath "gh" @(
     "C:\Program Files\GitHub CLI\gh.exe",
     "C:\Program Files (x86)\GitHub CLI\gh.exe",
@@ -110,10 +101,15 @@ if ($Status -and -not $AllowDirty) {
     throw "Working tree has uncommitted changes. Commit local work before publishing, or pass -AllowDirty for packaging-only checks."
 }
 
+$Version = (& python -c "from app import __version__; print(__version__)").Trim()
+if ($LASTEXITCODE -ne 0 -or -not $Version) {
+    throw "Could not determine the application version."
+}
 if (-not $Tag) {
-    # 태그를 직접 지정하지 않으면 KST 현재 시각으로 새 버전명을 만듭니다.
-    # 같은 날 여러 번 배포해도 겹치지 않도록 시분초까지 포함합니다.
-    $Tag = "v$((Get-KstNow).ToString('yyyy.MM.dd-HHmmss'))"
+    $Tag = "v$Version"
+}
+if ($Tag -ne "v$Version") {
+    throw "Release tag '$Tag' does not match the single source version 'v$Version'."
 }
 if (-not $Title) {
     $Title = "$Name $Tag"
@@ -233,12 +229,61 @@ $ChecksumPath = "$($ZipItem.FullName).sha256"
 Set-Content -LiteralPath $ChecksumPath -Value "$ZipHash  $($ZipItem.Name)" -Encoding ASCII
 $ChecksumItem = Get-Item -LiteralPath $ChecksumPath
 
+$SbomPath = Join-Path $ReleaseDir "${Name}_${SafeTag}_sbom.cdx.json"
+Invoke-Checked "cyclonedx-py" @(
+    "requirements",
+    "requirements.lock",
+    "--output-reproducible",
+    "--output-format",
+    "JSON",
+    "--output-file",
+    $SbomPath
+)
+$SbomItem = Get-Item -LiteralPath $SbomPath
+$SbomPayload = Get-Content -LiteralPath $SbomItem.FullName -Raw | ConvertFrom-Json
+if ($SbomPayload.bomFormat -ne "CycloneDX" -or $SbomPayload.specVersion -ne "1.6" -or @($SbomPayload.components).Count -lt 1) {
+    throw "Generated SBOM failed the CycloneDX 1.6 validation gate."
+}
+$SbomHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $SbomItem.FullName).Hash.ToLowerInvariant()
+
+$ManifestPath = Join-Path $ReleaseDir "${Name}_${SafeTag}_release-manifest.json"
+[ordered]@{
+    schema_version = 1
+    application_version = $Version
+    tag = $Tag
+    source_commit = $Head
+    zip = [ordered]@{
+        name = $ZipItem.Name
+        bytes = $ZipItem.Length
+        sha256 = $ZipHash
+    }
+    sbom = [ordered]@{
+        name = $SbomItem.Name
+        bytes = $SbomItem.Length
+        sha256 = $SbomHash
+        format = "CycloneDX 1.6 JSON"
+    }
+} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $ManifestPath -Encoding UTF8
+$ManifestItem = Get-Item -LiteralPath $ManifestPath
+
+Invoke-Checked "python" @(
+    "scripts\verify_release_assets.py",
+    "--zip", $ZipItem.FullName,
+    "--checksum", $ChecksumItem.FullName,
+    "--sbom", $SbomItem.FullName,
+    "--manifest", $ManifestItem.FullName,
+    "--expected-version", $Version,
+    "--expected-source-commit", $Head
+)
+
 if ($SkipUpload) {
     Write-Host "Release package created without upload."
     Write-Host "EXE: $($ExeItem.FullName) ($($ExeItem.Length) bytes)"
     Write-Host "ZIP: $($ZipItem.FullName) ($($ZipItem.Length) bytes)"
     Write-Host "SHA256: $ZipHash"
     Write-Host "CHECKSUM: $($ChecksumItem.FullName)"
+    Write-Host "SBOM: $($SbomItem.FullName) ($($SbomItem.Length) bytes; SHA256 $SbomHash)"
+    Write-Host "MANIFEST: $($ManifestItem.FullName)"
     exit 0
 }
 
@@ -279,6 +324,9 @@ $ChangeSummaryText
 - 압축 파일: $($ZipItem.Name) ($($ZipItem.Length) bytes)
 - 압축 해제 안내: README-실행안내.txt
 - ZIP SHA256: $ZipHash
+- SBOM: $($SbomItem.Name) ($($SbomItem.Length) bytes)
+- SBOM SHA256: $SbomHash
+- 릴리스 manifest: $($ManifestItem.Name)
 
 ## 검증
 
@@ -293,6 +341,8 @@ $ReleaseArgs = @(
     $Tag,
     $ZipItem.FullName,
     $ChecksumItem.FullName,
+    $SbomItem.FullName,
+    $ManifestItem.FullName,
     "--title",
     $Title,
     "--notes-file",
@@ -312,3 +362,5 @@ Write-Host "EXE: $($ExeItem.FullName) ($($ExeItem.Length) bytes)"
 Write-Host "ZIP: $($ZipItem.FullName) ($($ZipItem.Length) bytes)"
 Write-Host "SHA256: $ZipHash"
 Write-Host "CHECKSUM: $($ChecksumItem.FullName)"
+Write-Host "SBOM: $($SbomItem.FullName) ($($SbomItem.Length) bytes; SHA256 $SbomHash)"
+Write-Host "MANIFEST: $($ManifestItem.FullName)"

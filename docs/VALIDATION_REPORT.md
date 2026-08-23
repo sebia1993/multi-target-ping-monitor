@@ -147,6 +147,10 @@ python scripts\run_stability_soak_suite.py --validate-only --run-id <RUN_ID>
 | `max_log_queue_depth` | Session Log writer backlog |
 | `max_ui_event_gap_seconds` | UI freeze 체감 가능성 |
 | `max_ui_event_process_seconds` | 한 번의 UI 작업이 event loop를 오래 점유하는지 |
+| `cadence_max_abs_grid_drift_seconds` | 완료 시간 누적으로 측정 주기가 계속 밀리지 않는지 |
+| `max_same_target_overlap` | 같은 대상 ping이 중복 실행되지 않는지 |
+| `process_handle_growth` | Windows handle leak 징후 |
+| 세션 resume/loader lifecycle | 재개 관계와 QThread owner cleanup 경계 |
 
 UI 10/20/50 프로필은 기본적으로 `max_ui_event_gap_seconds`와 `max_ui_event_process_seconds`가 0.2초 이하인지 확인합니다.
 
@@ -177,12 +181,13 @@ Windows EXE 빌드:
 python scripts\verify_release.py --exe
 ```
 
-GitHub Actions의 `Windows Release Verify`는 Windows runner에서:
+GitHub Actions의 통합 `CI` workflow는 Windows runner에서:
 
 1. Source verifier
 2. PyInstaller build
 3. Packaged EXE smoke
-4. Artifact 보관
+4. CycloneDX runtime SBOM 생성
+5. 검증된 package artifact 보관
 
 순서로 확인할 수 있습니다.
 

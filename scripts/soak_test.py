@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import ctypes
 import json
 import os
 import statistics
@@ -10,7 +11,7 @@ import threading
 import time
 import tracemalloc
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,13 +21,80 @@ if str(ROOT) not in sys.path:
 
 from app.core.models import STATUS_OK, STATUS_TIMEOUT, PingResult
 from app.storage.atomic_write import atomic_write_path
+from app.storage.session_index import SessionIndexStore
 from app.storage.session_log import iter_observations, session_log_segment_index
-from app.ui.worker import TRACE_REFRESH_SECONDS, MeasurementWorker
-
+from app.ui.session_observation_loader import SessionObservationLoader
+from app.ui.worker import (
+    MEASUREMENT_MODE_FINAL_HOP_ONLY,
+    TRACE_REFRESH_SECONDS,
+    MeasurementWorker,
+)
 
 # soak test는 "오래 돌려도 멈추지 않는지" 보는 안정성 테스트입니다.
 # 실제 IP를 때리지 않고 가짜 ping 응답을 만들어, timeout이 많은 환경을 안전하게 재현합니다.
 TOP_EVENT_SAMPLE_LIMIT = 10
+EVIDENCE_SCHEMA_VERSION = 2
+FIXED_DURATION_PROFILES = frozenset({"long4h", "long8h", "long24h"})
+
+
+@dataclass
+class ProbeCadenceEvidence:
+    """Bounded per-target timing evidence for the synthetic probe boundary."""
+
+    interval_seconds: float
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    anchors: dict[str, float] = field(default_factory=dict)
+    previous_starts: dict[str, float] = field(default_factory=dict)
+    call_counts: dict[str, int] = field(default_factory=dict)
+    active_calls: dict[str, int] = field(default_factory=dict)
+    max_same_target_overlap: int = 0
+    max_abs_grid_drift_seconds: float = 0.0
+    max_start_gap_seconds: float = 0.0
+    total_start_gap_seconds: float = 0.0
+    start_gap_count: int = 0
+
+    def started(self, target: str, *, include_in_cadence: bool) -> None:
+        now = time.monotonic()
+        with self.lock:
+            active = self.active_calls.get(target, 0) + 1
+            self.active_calls[target] = active
+            self.max_same_target_overlap = max(self.max_same_target_overlap, active)
+            self.call_counts[target] = self.call_counts.get(target, 0) + 1
+            if not include_in_cadence or self.interval_seconds <= 0:
+                return
+            anchor = self.anchors.setdefault(target, now)
+            previous = self.previous_starts.get(target)
+            self.previous_starts[target] = now
+            if previous is not None:
+                gap = now - previous
+                self.max_start_gap_seconds = max(self.max_start_gap_seconds, gap)
+                self.total_start_gap_seconds += gap
+                self.start_gap_count += 1
+            slot = round((now - anchor) / self.interval_seconds)
+            grid_time = anchor + slot * self.interval_seconds
+            self.max_abs_grid_drift_seconds = max(
+                self.max_abs_grid_drift_seconds,
+                abs(now - grid_time),
+            )
+
+    def finished(self, target: str) -> None:
+        with self.lock:
+            self.active_calls[target] = max(self.active_calls.get(target, 1) - 1, 0)
+
+    def summary(self) -> dict[str, int | float]:
+        with self.lock:
+            cadence_targets = len(self.anchors)
+            cadence_calls = sum(self.call_counts.get(target, 0) for target in self.anchors)
+            return {
+                "cadence_target_count": cadence_targets,
+                "cadence_probe_starts": cadence_calls,
+                "cadence_max_abs_grid_drift_seconds": self.max_abs_grid_drift_seconds,
+                "cadence_max_start_gap_seconds": self.max_start_gap_seconds,
+                "cadence_avg_start_gap_seconds": (
+                    self.total_start_gap_seconds / self.start_gap_count if self.start_gap_count else 0.0
+                ),
+                "max_same_target_overlap": self.max_same_target_overlap,
+            }
 
 
 @dataclass
@@ -316,8 +384,9 @@ def main() -> int:
     ping_counter_lock = threading.Lock()
     # 앞쪽 일부 IP는 정상 응답, 뒤쪽 IP는 timeout으로 만듭니다.
     # 예를 들어 targets=50, timeout_ratio=0.8이면 대략 40개가 timeout입니다.
-    timeout_start_index = max(1, int(args.targets * (1 - args.timeout_ratio)) + 1)
+    timeout_start_index = max(1, round(args.targets * (1 - args.timeout_ratio)) + 1)
     traceroute_probe = StableTracerouteProbe()
+    cadence_evidence = ProbeCadenceEvidence(float(args.interval_seconds))
 
     def ping_factory(timeout_ms: int) -> SimulatedPingRunner:
         return SimulatedPingRunner(
@@ -327,6 +396,7 @@ def main() -> int:
             calls=ping_calls,
             results=ping_results,
             counter_lock=ping_counter_lock,
+            cadence_evidence=cadence_evidence,
         )
 
     # 실제 앱과 같은 MeasurementWorker를 사용하되, ping/tracert 실행기만 가짜로 바꿉니다.
@@ -342,9 +412,7 @@ def main() -> int:
     )
     worker.measurement_updated.connect(lambda *_args: updates.append(time.monotonic()))
     worker.diagnostics_updated.connect(
-        lambda diagnostics: diagnostics_rows.append(
-            diagnostics_to_row(diagnostics, time.monotonic() - started_at)
-        )
+        lambda diagnostics: diagnostics_rows.append(diagnostics_to_row(diagnostics, time.monotonic() - started_at))
     )
     worker.error_message.connect(errors.append)
     worker.session_log_ready.connect(session_log_paths.append)
@@ -391,6 +459,7 @@ def main() -> int:
                         "current_memory_bytes": current_memory,
                         "peak_memory_bytes": peak_memory,
                         "active_threads": threading.active_count(),
+                        "process_handle_count": process_handle_count(),
                         "event_process_seconds": round(time.monotonic() - before_events, 6),
                     }
                 )
@@ -415,8 +484,16 @@ def main() -> int:
             "current_memory_bytes": current_memory,
             "peak_memory_bytes": peak_memory,
             "active_threads": threading.active_count(),
+            "process_handle_count": process_handle_count(),
             "event_process_seconds": 0.0,
         }
+    )
+
+    lifecycle_evidence = verify_session_lifecycle(
+        args=args,
+        app=app,
+        targets=targets,
+        session_log_paths=session_log_paths,
     )
 
     # 수집한 값을 한 번에 요약한 뒤 기준치를 넘는 항목이 있는지 평가합니다.
@@ -439,6 +516,8 @@ def main() -> int:
         diagnostics_csv_path=diagnostics_csv_path,
         health_csv_path=health_csv_path,
         stopped_cleanly=stopped_cleanly,
+        cadence_evidence=cadence_evidence.summary(),
+        lifecycle_evidence=lifecycle_evidence,
     )
     failures = evaluate_summary(summary, args)
     summary["failures"] = failures
@@ -513,6 +592,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--timeout-ratio must be between 0 and 1")
     if args.interval_seconds < 0:
         parser.error("--interval-seconds must be non-negative")
+    expected_duration = float(SOAK_PROFILES[args.profile]["duration_seconds"])
+    if args.profile in FIXED_DURATION_PROFILES and args.duration_seconds != expected_duration:
+        parser.error(
+            f"--profile {args.profile} requires exactly {expected_duration:.0f} seconds; "
+            "use a smoke profile for shortened checks"
+        )
     return args
 
 
@@ -585,6 +670,7 @@ class SimulatedPingRunner:
         calls: dict[str, int],
         results: dict[str, int],
         counter_lock: threading.Lock,
+        cadence_evidence: ProbeCadenceEvidence | None = None,
     ) -> None:
         self.timeout_ms = timeout_ms
         self.timeout_start_index = timeout_start_index
@@ -592,21 +678,120 @@ class SimulatedPingRunner:
         self.calls = calls
         self.results = results
         self.counter_lock = counter_lock
+        self.cadence_evidence = cadence_evidence or ProbeCadenceEvidence(1.0)
 
     def ping(self, target: str) -> PingResult:
-        self._increment(self.calls, target)
         target_index = int(target.rsplit(".", 1)[1])
-        if target_index >= self.timeout_start_index:
-            time.sleep(self.timeout_delay_seconds)
+        is_timeout = target_index >= self.timeout_start_index
+        self.cadence_evidence.started(target, include_in_cadence=not is_timeout)
+        self._increment(self.calls, target)
+        try:
+            if is_timeout:
+                time.sleep(self.timeout_delay_seconds)
+                self._increment(self.results, target)
+                return PingResult(target, False, None, STATUS_TIMEOUT, datetime.now())
+            time.sleep(0.01)
             self._increment(self.results, target)
-            return PingResult(target, False, None, STATUS_TIMEOUT, datetime.now())
-        time.sleep(0.01)
-        self._increment(self.results, target)
-        return PingResult(target, True, 10.0, STATUS_OK, datetime.now())
+            return PingResult(target, True, 10.0, STATUS_OK, datetime.now())
+        finally:
+            self.cadence_evidence.finished(target)
 
     def _increment(self, counters: dict[str, int], target: str) -> None:
         with self.counter_lock:
             counters[target] = counters.get(target, 0) + 1
+
+
+def process_handle_count() -> int | None:
+    """Return the Windows process handle count without an optional dependency."""
+
+    if os.name != "nt":
+        return None
+    count = ctypes.c_ulong()
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel32.GetProcessHandleCount.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+    kernel32.GetProcessHandleCount.restype = ctypes.c_int
+    process = kernel32.GetCurrentProcess()
+    if not kernel32.GetProcessHandleCount(process, ctypes.byref(count)):
+        return None
+    return int(count.value)
+
+
+def verify_session_lifecycle(
+    *,
+    args: argparse.Namespace,
+    app: object,
+    targets: list[str],
+    session_log_paths: list[str],
+) -> dict[str, object]:
+    """Exercise a real resume record and QThread loader ownership after the soak."""
+
+    evidence: dict[str, object] = {
+        "session_resume_verified": False,
+        "session_loader_wait_completed": False,
+        "session_loader_reserved_before_cleanup": False,
+        "session_loader_released_after_cleanup": False,
+        "session_lifecycle_errors": [],
+    }
+    errors: list[str] = evidence["session_lifecycle_errors"]  # type: ignore[assignment]
+    if not session_log_paths or args.session_log_root is None:
+        errors.append("main soak session log was not created")
+        return evidence
+
+    store = SessionIndexStore.create(args.session_log_root)
+    source_records = store.list_sessions(recover_missing=True)
+    if not source_records:
+        errors.append("main soak session index record was not created")
+        return evidence
+    source = source_records[0]
+
+    class ResumePingRunner:
+        def __init__(self, timeout_ms: int) -> None:
+            self.timeout_ms = timeout_ms
+
+        def ping(self, target: str) -> PingResult:
+            return PingResult(target, True, 10.0, STATUS_OK, datetime.now())
+
+    resume_errors: list[str] = []
+    resume_worker = MeasurementWorker(
+        targets[0],
+        interval_seconds=0,
+        max_cycles=1,
+        targets=[targets[0]],
+        ping_probe_factory=ResumePingRunner,
+        traceroute_probe=StableTracerouteProbe(),
+        measurement_mode=MEASUREMENT_MODE_FINAL_HOP_ONLY,
+        session_log_root=args.session_log_root,
+    )
+    resume_worker.resumed_from_session_id = source.session_id
+    resume_worker.error_message.connect(resume_errors.append)
+    resume_worker.session_log_ready.connect(session_log_paths.append)
+    resume_worker.run()
+    process_application_events(app, 0)
+    if resume_errors:
+        errors.extend(f"resume worker: {message}" for message in resume_errors)
+    refreshed_records = store.list_sessions(recover_missing=True)
+    evidence["session_resume_verified"] = any(
+        record.session_id != source.session_id and record.resumed_from_session_id == source.session_id
+        for record in refreshed_records
+    )
+
+    loader_errors: list[str] = []
+    loader = SessionObservationLoader(
+        request_id=1,
+        path=Path(source.sample_path),
+        start=datetime.now() - timedelta(days=3650),
+        end=datetime.now() + timedelta(days=1),
+    )
+    loader.failed.connect(lambda _request_id, message: loader_errors.append(message))
+    loader.start()
+    evidence["session_loader_wait_completed"] = loader.wait(30_000)
+    evidence["session_loader_reserved_before_cleanup"] = loader.isRunning()
+    loader.deleteLater()
+    evidence["session_loader_released_after_cleanup"] = not loader.isRunning()
+    process_application_events(app, 0)
+    errors.extend(f"session loader: {message}" for message in loader_errors)
+    return evidence
 
 
 def diagnostics_to_row(diagnostics: object, elapsed_seconds: float) -> dict[str, object]:
@@ -619,6 +804,13 @@ def diagnostics_to_row(diagnostics: object, elapsed_seconds: float) -> dict[str,
         "backoff_target_count": getattr(diagnostics, "backoff_target_count", 0),
         "log_queue_depth": getattr(diagnostics, "log_queue_depth", 0),
         "average_loop_delay_ms": getattr(diagnostics, "average_loop_delay_ms", 0.0),
+        "cadence_scheduled_count": getattr(diagnostics, "cadence_scheduled_count", 0),
+        "cadence_skipped_slot_count": getattr(diagnostics, "cadence_skipped_slot_count", 0),
+        "max_cadence_start_lateness_ms": getattr(
+            diagnostics,
+            "max_cadence_start_lateness_ms",
+            0.0,
+        ),
         "tracert_status": getattr(diagnostics, "tracert_status", ""),
     }
 
@@ -642,6 +834,8 @@ def build_summary(
     diagnostics_csv_path: Path,
     health_csv_path: Path,
     stopped_cleanly: bool,
+    cadence_evidence: dict[str, int | float] | None = None,
+    lifecycle_evidence: dict[str, object] | None = None,
 ) -> dict[str, Any]:
     # raw 샘플을 그대로 읽기 어렵기 때문에, 실패 판단에 필요한 최댓값과 평균값만 요약합니다.
     # 이 summary는 콘솔 출력과 JSON 파일에 같이 기록됩니다.
@@ -649,9 +843,7 @@ def build_summary(
     update_gaps = [later - earlier for earlier, later in zip(updates, updates[1:])]
     current_memory_values = [int(row["current_memory_bytes"]) for row in health_rows]
     memory_growth = (
-        max(current_memory_values) - current_memory_values[0]
-        if current_memory_values
-        else current_memory_bytes
+        max(current_memory_values) - current_memory_values[0] if current_memory_values else current_memory_bytes
     )
     max_pending = max_int(diagnostics_rows, "pending_ping_count")
     max_active = max_int(diagnostics_rows, "active_ping_count")
@@ -660,12 +852,18 @@ def build_summary(
     max_backoff_targets = max_int(diagnostics_rows, "backoff_target_count")
     max_loop_delay_ms = max_float(diagnostics_rows, "average_loop_delay_ms")
     max_threads = max_int(health_rows, "active_threads")
+    handle_values = [
+        int(row["process_handle_count"]) for row in health_rows if row.get("process_handle_count") is not None
+    ]
+    handle_growth = max(handle_values) - handle_values[0] if handle_values else None
     cpu_percent = (cpu_seconds / elapsed * 100.0) if elapsed > 0 else 0.0
     completed_ping_results = sum(ping_results.values())
     session_log_min_expected_rows = completed_ping_results
     session_log_row_delta = session_stats["rows"] - session_log_min_expected_rows
-    return {
+    summary = {
+        "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
         "profile": args.profile,
+        "platform": os.name,
         "targets": args.targets,
         "timeout_ratio": args.timeout_ratio,
         "duration_seconds": elapsed,
@@ -683,6 +881,10 @@ def build_summary(
         "traceroute_calls": traceroute_calls,
         "active_threads_final": threading.active_count(),
         "max_active_threads": max_threads,
+        "process_handle_samples": len(handle_values),
+        "process_handle_count_final": handle_values[-1] if handle_values else None,
+        "max_process_handle_count": max(handle_values) if handle_values else None,
+        "process_handle_growth": handle_growth,
         "cpu_seconds": cpu_seconds,
         "cpu_percent": cpu_percent,
         "current_memory_bytes": current_memory_bytes,
@@ -705,15 +907,66 @@ def build_summary(
         "max_backoff_target_count": max_backoff_targets,
         "max_log_queue_depth": max_log_queue,
         "max_average_loop_delay_ms": max_loop_delay_ms,
+        "cadence_scheduled_count": max_int(diagnostics_rows, "cadence_scheduled_count"),
+        "cadence_skipped_slot_count": max_int(diagnostics_rows, "cadence_skipped_slot_count"),
+        "max_cadence_start_lateness_ms": max_float(
+            diagnostics_rows,
+            "max_cadence_start_lateness_ms",
+        ),
         "diagnostics_csv": str(diagnostics_csv_path),
         "health_csv": str(health_csv_path),
     }
+    summary.update(cadence_evidence or {})
+    summary.update(lifecycle_evidence or {})
+    return summary
 
 
 def evaluate_summary(summary: dict[str, Any], args: argparse.Namespace) -> list[str]:
     # 여기서 성공/실패 기준을 한곳에 모아 판정합니다.
     # 기준을 조정해야 할 때는 Worker 코드가 아니라 이 함수의 threshold를 먼저 확인하면 됩니다.
     failures: list[str] = []
+    required_evidence_fields = {
+        "evidence_schema_version",
+        "platform",
+        "errors",
+        "stopped_cleanly",
+        "updates",
+        "diagnostic_samples",
+        "max_update_gap_seconds",
+        "avg_update_gap_seconds",
+        "max_ui_event_gap_seconds",
+        "max_ui_event_process_seconds",
+        "max_active_ping_count",
+        "max_pending_ping_count",
+        "max_log_queue_depth",
+        "active_threads_final",
+        "max_active_threads",
+        "memory_growth_bytes",
+        "cpu_percent",
+        "cadence_target_count",
+        "cadence_probe_starts",
+        "cadence_max_abs_grid_drift_seconds",
+        "cadence_max_start_gap_seconds",
+        "cadence_avg_start_gap_seconds",
+        "max_same_target_overlap",
+        "session_resume_verified",
+        "session_loader_wait_completed",
+        "session_loader_reserved_before_cleanup",
+        "session_loader_released_after_cleanup",
+        "session_lifecycle_errors",
+        "session_log_rows",
+        "session_log_segments",
+        "ping_results",
+        "max_backoff_target_count",
+        "traceroute_calls",
+    }
+    missing_fields = sorted(required_evidence_fields.difference(summary))
+    if missing_fields:
+        return [f"required evidence fields missing: {', '.join(missing_fields)}"]
+    if int(summary["evidence_schema_version"]) != EVIDENCE_SCHEMA_VERSION:
+        failures.append(
+            f"unsupported evidence schema: {summary['evidence_schema_version']} != {EVIDENCE_SCHEMA_VERSION}"
+        )
     max_update_gap_seconds = args.max_update_gap_seconds or max(
         args.interval_seconds * 4,
         args.timeout_delay_seconds + 3,
@@ -755,8 +1008,7 @@ def evaluate_summary(summary: dict[str, Any], args: argparse.Namespace) -> list[
         )
     if summary["max_ui_event_gap_seconds"] > args.max_ui_event_gap_seconds:
         failures.append(
-            f"UI event gap too high: {summary['max_ui_event_gap_seconds']:.3f}s > "
-            f"{args.max_ui_event_gap_seconds:.3f}s"
+            f"UI event gap too high: {summary['max_ui_event_gap_seconds']:.3f}s > {args.max_ui_event_gap_seconds:.3f}s"
         )
     if summary["max_ui_event_process_seconds"] > args.max_ui_event_process_seconds:
         failures.append(
@@ -770,11 +1022,52 @@ def evaluate_summary(summary: dict[str, Any], args: argparse.Namespace) -> list[
     if summary["max_active_threads"] > args.max_active_threads:
         failures.append(f"active thread count too high: {summary['max_active_threads']} > {args.max_active_threads}")
     if summary["memory_growth_bytes"] > max_memory_growth_bytes:
-        failures.append(
-            f"memory growth too high: {summary['memory_growth_bytes']} > {max_memory_growth_bytes}"
-        )
+        failures.append(f"memory growth too high: {summary['memory_growth_bytes']} > {max_memory_growth_bytes}")
     if summary["cpu_percent"] > args.max_cpu_percent:
         failures.append(f"CPU usage too high: {summary['cpu_percent']:.1f}% > {args.max_cpu_percent:.1f}%")
+    if int(summary["max_same_target_overlap"]) > 1:
+        failures.append(f"same-target probe overlap detected: {summary['max_same_target_overlap']} > 1")
+    cadence_target_count = int(summary["cadence_target_count"])
+    if cadence_target_count < 1:
+        failures.append("no healthy target cadence evidence was recorded")
+    min_cadence_starts = cadence_target_count * min_updates
+    if int(summary["cadence_probe_starts"]) < min_cadence_starts:
+        failures.append(f"too few cadence probe starts: {summary['cadence_probe_starts']} < {min_cadence_starts}")
+    max_grid_drift = max(float(args.interval_seconds) * 0.45, 0.05)
+    if float(summary["cadence_max_abs_grid_drift_seconds"]) > max_grid_drift:
+        failures.append(
+            f"cadence grid drift too high: {summary['cadence_max_abs_grid_drift_seconds']} > {max_grid_drift}"
+        )
+    max_cadence_gap = max(float(args.interval_seconds) * 1.5, 2.0)
+    if float(summary["cadence_max_start_gap_seconds"]) > max_cadence_gap:
+        failures.append(f"cadence start gap too high: {summary['cadence_max_start_gap_seconds']} > {max_cadence_gap}")
+    if summary.get("platform") == "nt":
+        windows_handle_fields = {
+            "process_handle_samples",
+            "process_handle_count_final",
+            "max_process_handle_count",
+            "process_handle_growth",
+        }
+        missing_handle_fields = sorted(windows_handle_fields.difference(summary))
+        if missing_handle_fields:
+            failures.append(f"Windows process handle fields missing: {', '.join(missing_handle_fields)}")
+        elif int(summary["process_handle_samples"]) < 1:
+            failures.append("Windows process handle evidence was not recorded")
+        else:
+            handle_growth = summary["process_handle_growth"]
+            max_handle_growth = int(getattr(args, "max_handle_growth", 256))
+            if handle_growth is None or int(handle_growth) > max_handle_growth:
+                failures.append(f"process handle growth too high or missing: {handle_growth} > {max_handle_growth}")
+    for lifecycle_key in (
+        "session_resume_verified",
+        "session_loader_wait_completed",
+        "session_loader_reserved_before_cleanup",
+        "session_loader_released_after_cleanup",
+    ):
+        if summary[lifecycle_key] is not True:
+            failures.append(f"session lifecycle evidence failed: {lifecycle_key}")
+    if summary["session_lifecycle_errors"]:
+        failures.append(f"session lifecycle errors: {summary['session_lifecycle_errors']}")
     if int(summary.get("session_log_segments", 0) or 0) < 1:
         failures.append("session log was not created")
     completed_pings = int(summary.get("ping_results", summary.get("ping_calls", 0)) or 0)
@@ -787,9 +1080,7 @@ def evaluate_summary(summary: dict[str, Any], args: argparse.Namespace) -> list[
     if args.duration_seconds >= TRACE_REFRESH_SECONDS * 1.5:
         expected_trace_calls = max(int(args.duration_seconds // TRACE_REFRESH_SECONDS), 1)
         if summary["traceroute_calls"] < expected_trace_calls:
-            failures.append(
-                f"too few tracert refreshes: {summary['traceroute_calls']} < {expected_trace_calls}"
-            )
+            failures.append(f"too few tracert refreshes: {summary['traceroute_calls']} < {expected_trace_calls}")
     return failures
 
 
@@ -824,6 +1115,9 @@ def write_diagnostics_csv(path: Path, rows: list[dict[str, object]]) -> None:
         "backoff_target_count",
         "log_queue_depth",
         "average_loop_delay_ms",
+        "cadence_scheduled_count",
+        "cadence_skipped_slot_count",
+        "max_cadence_start_lateness_ms",
         "tracert_status",
     ]
     atomic_write_path(path, lambda temp_path: _write_csv(temp_path, fieldnames, rows))
@@ -835,6 +1129,7 @@ def write_health_csv(path: Path, rows: list[dict[str, object]]) -> None:
         "current_memory_bytes",
         "peak_memory_bytes",
         "active_threads",
+        "process_handle_count",
         "event_process_seconds",
     ]
     atomic_write_path(path, lambda temp_path: _write_csv(temp_path, fieldnames, rows))

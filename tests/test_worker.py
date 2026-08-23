@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import time
 import threading
+import time
 from collections import deque
 from concurrent.futures import Future
 from datetime import datetime, timedelta
@@ -15,8 +15,8 @@ from app.core.metrics import TargetMetricTracker
 from app.core.models import STATUS_ERROR, STATUS_OK, STATUS_PAUSED, STATUS_TIMEOUT, HopInfo, HopObservation, PingResult
 from app.storage import session_log as session_log_module
 from app.storage.route_log import RouteLogWriter, route_changes_in_range
-from app.storage.session_log import SessionLogWriter, read_observations
 from app.storage.session_index import SESSION_STATE_ARCHIVED, SESSION_STATE_PAUSED, SessionIndexStore
+from app.storage.session_log import SessionLogWriter, read_observations
 from app.ui import worker as worker_module
 from app.ui.worker import (
     MEASUREMENT_MODE_FINAL_HOP_ONLY,
@@ -142,17 +142,21 @@ def test_worker_emits_route_change_when_refreshed_trace_differs() -> None:
     worker.route_changed.connect(changes.append)
 
     first: Future[list[HopInfo]] = Future()
-    first.set_result([
-        HopInfo(index=1, address="192.0.2.1", hostname="gateway"),
-        HopInfo(index=2, address="198.51.100.10", hostname="target", is_target=True),
-    ])
+    first.set_result(
+        [
+            HopInfo(index=1, address="192.0.2.1", hostname="gateway"),
+            HopInfo(index=2, address="198.51.100.10", hostname="target", is_target=True),
+        ]
+    )
     metrics, hops = worker._refresh_trace_result(None, [], first, first_check=True)
 
     second: Future[list[HopInfo]] = Future()
-    second.set_result([
-        HopInfo(index=1, address="192.0.2.254", hostname="backup"),
-        HopInfo(index=2, address="198.51.100.10", hostname="target", is_target=True),
-    ])
+    second.set_result(
+        [
+            HopInfo(index=1, address="192.0.2.254", hostname="backup"),
+            HopInfo(index=2, address="198.51.100.10", hostname="target", is_target=True),
+        ]
+    )
     worker._refresh_trace_result(metrics, hops, second)
 
     assert len(changes) == 1
@@ -166,17 +170,21 @@ def test_worker_persists_route_change_snapshots(tmp_path) -> None:
 
     with RouteLogWriter(route_log_path) as route_log:
         first: Future[list[HopInfo]] = Future()
-        first.set_result([
-            HopInfo(index=1, address="192.0.2.1", hostname="gateway"),
-            HopInfo(index=2, address="198.51.100.10", hostname="target", is_target=True),
-        ])
+        first.set_result(
+            [
+                HopInfo(index=1, address="192.0.2.1", hostname="gateway"),
+                HopInfo(index=2, address="198.51.100.10", hostname="target", is_target=True),
+            ]
+        )
         metrics, hops = worker._refresh_trace_result(None, [], first, route_log, first_check=True)
 
         second: Future[list[HopInfo]] = Future()
-        second.set_result([
-            HopInfo(index=1, address="192.0.2.254", hostname="backup"),
-            HopInfo(index=2, address="198.51.100.10", hostname="target", is_target=True),
-        ])
+        second.set_result(
+            [
+                HopInfo(index=1, address="192.0.2.254", hostname="backup"),
+                HopInfo(index=2, address="198.51.100.10", hostname="target", is_target=True),
+            ]
+        )
         worker._refresh_trace_result(metrics, hops, second, route_log)
 
     changes = route_changes_in_range(route_log_path, datetime(2026, 1, 1), datetime(2099, 1, 1))
@@ -196,17 +204,21 @@ def test_worker_continues_when_route_log_write_fails() -> None:
     worker.route_changed.connect(changes.append)
 
     first: Future[list[HopInfo]] = Future()
-    first.set_result([
-        HopInfo(index=1, address="192.0.2.1", hostname="gateway"),
-        HopInfo(index=2, address="198.51.100.10", hostname="target", is_target=True),
-    ])
+    first.set_result(
+        [
+            HopInfo(index=1, address="192.0.2.1", hostname="gateway"),
+            HopInfo(index=2, address="198.51.100.10", hostname="target", is_target=True),
+        ]
+    )
     metrics, hops = worker._refresh_trace_result(None, [], first, route_log, first_check=True)
 
     second: Future[list[HopInfo]] = Future()
-    second.set_result([
-        HopInfo(index=1, address="192.0.2.254", hostname="backup"),
-        HopInfo(index=2, address="198.51.100.10", hostname="target", is_target=True),
-    ])
+    second.set_result(
+        [
+            HopInfo(index=1, address="192.0.2.254", hostname="backup"),
+            HopInfo(index=2, address="198.51.100.10", hostname="target", is_target=True),
+        ]
+    )
     refreshed_metrics, refreshed_hops = worker._refresh_trace_result(metrics, hops, second, route_log)
 
     assert route_log.calls == 2
@@ -215,8 +227,7 @@ def test_worker_continues_when_route_log_write_fails() -> None:
     assert len(changes) == 1
     assert getattr(changes[0], "changed_hops") == (1,)
     assert errors == [
-        "경로 로그 저장 중 오류가 발생했습니다. 측정은 계속 진행합니다. "
-        "(ROUTE_LOG_WRITE_FAILED: PermissionError)"
+        "경로 로그 저장 중 오류가 발생했습니다. 측정은 계속 진행합니다. (ROUTE_LOG_WRITE_FAILED: PermissionError)"
     ]
 
 
@@ -610,10 +621,12 @@ def test_probe_pool_closes_remaining_probes_after_close_error() -> None:
     events: list[str] = []
     pool = worker_module._ThreadLocalPingProbePool(lambda: object())
     with pool._lock:
-        pool._probes.extend([
-            _CloseFailingProbe("first", events),
-            _RecordingCloseProbe("second", events),
-        ])
+        pool._probes.extend(
+            [
+                _CloseFailingProbe("first", events),
+                _RecordingCloseProbe("second", events),
+            ]
+        )
 
     pool.close()
     pool.close()
@@ -675,6 +688,7 @@ def test_target_probe_state_resets_backoff_after_recovery() -> None:
     recovered = PingResult("198.51.100.2", True, 10.0, STATUS_OK, datetime.now())
 
     for index in range(10):
+        state.last_scheduled_due = float(index)
         state.record_result(failed, base_interval_seconds=1, now=float(index))
 
     assert state.consecutive_failures == 10
@@ -685,6 +699,62 @@ def test_target_probe_state_resets_backoff_after_recovery() -> None:
     assert state.consecutive_failures == 0
     assert state.current_interval_seconds == 1
     assert state.next_due == 12.0
+
+
+def test_target_probe_state_uses_due_time_instead_of_completion_time() -> None:
+    state = TargetProbeState("198.51.100.10")
+    result = PingResult("198.51.100.10", True, 10.0, STATUS_OK, datetime.now())
+
+    assert state.is_due(1, now=100.0) is True
+    state.mark_started(100.0)
+    state.record_result(result, base_interval_seconds=1, now=100.4)
+
+    assert state.next_due == 101.0
+    assert state.next_due != pytest.approx(101.4)
+
+
+def test_target_probe_state_skips_missed_slots_without_burst() -> None:
+    state = TargetProbeState("198.51.100.10")
+    result = PingResult("198.51.100.10", True, 10.0, STATUS_OK, datetime.now())
+
+    assert state.is_due(1, now=10.0) is True
+    state.mark_started(10.0)
+    state.record_result(result, base_interval_seconds=1, now=13.2)
+
+    assert state.next_due == 14.0
+    assert state.skipped_slot_count == 3
+    assert state.is_due(1, now=13.2) is False
+    assert state.is_due(1, now=14.0) is True
+
+
+def test_target_probe_state_rebases_interval_change_from_scheduled_due() -> None:
+    state = TargetProbeState("198.51.100.10")
+    result = PingResult("198.51.100.10", True, 10.0, STATUS_OK, datetime.now())
+
+    assert state.is_due(1, now=100.0) is True
+    state.mark_started(100.0)
+    state.record_result(result, base_interval_seconds=1, now=100.2)
+
+    assert state.is_due(5, now=101.0) is False
+    assert state.next_due == 105.0
+
+
+def test_target_probe_state_pause_resume_catches_up_once() -> None:
+    state = TargetProbeState("198.51.100.10")
+    result = PingResult("198.51.100.10", True, 10.0, STATUS_OK, datetime.now())
+
+    assert state.is_due(2, now=20.0) is True
+    state.mark_started(20.0)
+    state.record_result(result, base_interval_seconds=2, now=20.1)
+    # The worker skips this state while paused. On resume, only one overdue probe
+    # may be reserved; record_result advances over every missed slot.
+    assert state.is_due(2, now=27.0) is True
+    state.mark_started(27.0)
+    state.record_result(result, base_interval_seconds=2, now=27.1)
+
+    assert state.scheduled_count == 2
+    assert state.skipped_slot_count == 2
+    assert state.next_due == 28.0
 
 
 def test_worker_keeps_twenty_targets_responsive_with_many_timeouts(monkeypatch) -> None:
@@ -1049,18 +1119,20 @@ def test_async_session_log_writer_coalesces_rapid_batches(tmp_path) -> None:
     writer = CountingWriter()
     session_log = worker_module._AsyncSessionLogWriter(writer)
     for second in range(20):
-        session_log.write_many([
-            HopObservation(
-                datetime(2026, 1, 1, 12, 0, second),
-                0,
-                "198.51.100.10",
-                "Target",
-                True,
-                10.0,
-                STATUS_OK,
-                is_target=True,
-            )
-        ])
+        session_log.write_many(
+            [
+                HopObservation(
+                    datetime(2026, 1, 1, 12, 0, second),
+                    0,
+                    "198.51.100.10",
+                    "Target",
+                    True,
+                    10.0,
+                    STATUS_OK,
+                    is_target=True,
+                )
+            ]
+        )
 
     session_log.close()
 
@@ -1107,10 +1179,7 @@ def test_async_session_log_writer_stops_measurement_instead_of_growing_queue_wit
 
     assert isinstance(exc_info.value.original, worker_module.SessionLogBackpressureError)
     assert session_log.queue_depth == 1
-    assert (
-        worker_module._session_log_error_summary(exc_info.value)
-        == "SESSION_LOG_BACKPRESSURE: queue_full"
-    )
+    assert worker_module._session_log_error_summary(exc_info.value) == "SESSION_LOG_BACKPRESSURE: queue_full"
     release.set()
     with pytest.raises(worker_module.SessionLogBackpressureError):
         session_log.close()
@@ -1121,10 +1190,7 @@ def test_session_log_error_summary_unwraps_background_writer_failure() -> None:
     original = RuntimeError("simulated async write failure")
     wrapped = worker_module._SessionLogWriterFailed(original)
 
-    assert (
-        worker_module._session_log_error_summary(wrapped)
-        == "SESSION_LOG_WRITE_FAILED: RuntimeError"
-    )
+    assert worker_module._session_log_error_summary(wrapped) == "SESSION_LOG_WRITE_FAILED: RuntimeError"
 
 
 def test_worker_marks_session_paused_when_session_log_close_fails(monkeypatch, tmp_path) -> None:
@@ -1438,7 +1504,7 @@ def test_worker_applies_runtime_add_and_remove_requests() -> None:
     assert worker.targets == ["203.0.113.10"]
     assert set(target_trackers) == {"203.0.113.10"}
     assert set(target_states) == {"203.0.113.10"}
-    assert active_target_pings == set()
+    assert active_target_pings == {"198.51.100.10"}
     assert worker.paused_targets() == set()
     assert worker.target_interval_overrides() == {}
 
@@ -1447,9 +1513,7 @@ def test_worker_discards_in_flight_result_from_removed_and_readded_target() -> N
     _app()
     target = "198.51.100.10"
     worker = MeasurementWorker(target, interval_seconds=1, max_cycles=None, targets=[target])
-    target_trackers = {
-        target: TargetMetricTracker(target, recent_observation_limit=RECENT_OBSERVATION_LIMIT)
-    }
+    target_trackers = {target: TargetMetricTracker(target, recent_observation_limit=RECENT_OBSERVATION_LIMIT)}
     old_state = TargetProbeState(target)
     target_states = {target: old_state}
     active_target_pings = {target}
@@ -1461,6 +1525,7 @@ def test_worker_discards_in_flight_result_from_removed_and_readded_target() -> N
     assert worker.add_targets([target]) == [target]
     assert worker._apply_pending_target_changes(target_trackers, target_states, active_target_pings) is True
     assert target_states[target] is not old_state
+    assert active_target_pings == {target}
 
     class CapturingSessionLog:
         def __init__(self) -> None:
@@ -1486,6 +1551,7 @@ def test_worker_discards_in_flight_result_from_removed_and_readded_target() -> N
     )
 
     assert target_trackers[target].snapshot().sent == 0
+    assert active_target_pings == set()
     assert session_log.observations == []
     assert list(recent_observations) == []
 

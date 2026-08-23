@@ -64,8 +64,16 @@ F12 개발자 모드는 로컬 개발 보조 기능입니다.
 - 개발용 산출물(`build/`, `artifacts/`, `logs/`, `exports/`)이 package에 없음
 - Release notes에 실제 운영망 정보가 없음
 - SHA-256이 게시된 배포 파일과 일치
+- runtime/dev 설치가 SHA-256 hash lock을 사용
+- `pip-audit`, CodeQL, secret scanning 결과에 처리되지 않은 high/medium 문제가 없음
+- CycloneDX 1.6 SBOM과 release manifest가 생성·파싱됨
+- ZIP build provenance와 SBOM attestation이 생성된 뒤 annotated tag/Release를 게시
+
+코드서명은 현재 제공하지 않습니다. 사용자는 Release 출처, SHA-256, GitHub attestation을 확인해야 하며 SmartScreen 경고 자체를 안전성 증명으로 해석하지 않습니다.
 
 ## 보안 문제 제보
+
+공개 Issue에 민감정보를 올리지 말고 GitHub의 **Report a vulnerability** 기능으로 비공개 제보하십시오. 보안 연락을 위한 별도 이메일 주소는 공개하지 않습니다.
 
 자격 증명, Token, 실제 운영망 정보가 공개된 경우 공개 Issue에 값을 반복해서 복사하지 마십시오.
 

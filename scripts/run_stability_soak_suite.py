@@ -14,10 +14,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.storage.atomic_write import atomic_write_path, read_text_with_retries
-from scripts.soak_test import SOAK_PROFILES, evaluate_summary, parse_args as parse_soak_args
-
+from scripts.soak_test import SOAK_PROFILES, evaluate_summary
+from scripts.soak_test import parse_args as parse_soak_args
 
 DEFAULT_PROFILES = ("long4h", "long8h", "long24h", "ui10", "ui20", "ui50")
+FIXED_EVIDENCE_PROFILES = frozenset({"long4h", "long8h", "long24h"})
 SUMMARY_MTIME_GRACE_SECONDS = 1.0
 
 
@@ -37,7 +38,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1 if failures else 0
         if failures:
-            print(json.dumps({"manifest": str(manifest_path), "validation_failures": failures}, ensure_ascii=False, indent=2))
+            print(
+                json.dumps(
+                    {"manifest": str(manifest_path), "validation_failures": failures}, ensure_ascii=False, indent=2
+                )
+            )
             return 1
         print(manifest_path)
         return 0
@@ -47,7 +52,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.resume and previous_payload and previous_payload.get("suite_started_at")
         else datetime.now().isoformat(timespec="seconds")
     )
-    results: list[dict[str, Any]] = list(previous_payload.get("results", [])) if args.resume and previous_payload else []
+    results: list[dict[str, Any]] = (
+        list(previous_payload.get("results", [])) if args.resume and previous_payload else []
+    )
 
     for profile in args.profiles:
         if args.resume and latest_passed_result(profile, results, manifest_path=manifest_path) is not None:
@@ -77,7 +84,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     validation_failures = validate_manifest(manifest_path, args.profiles)
     if validation_failures:
-        print(json.dumps({"manifest": str(manifest_path), "validation_failures": validation_failures}, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {"manifest": str(manifest_path), "validation_failures": validation_failures},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return 1
     if args.evidence_report:
         emit_evidence_report(
@@ -132,7 +145,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         help="Optional file path for the JSON evidence report. Use inside artifact folders for GitHub Actions runs.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    fixed_overrides = sorted(FIXED_EVIDENCE_PROFILES.intersection(args.profiles))
+    if args.override_duration_seconds is not None and fixed_overrides:
+        parser.error("fixed-duration evidence profiles cannot be shortened: " + ", ".join(fixed_overrides))
+    return args
 
 
 def run_profile(profile: str, *, args: argparse.Namespace, run_root: Path) -> dict[str, Any]:
@@ -194,6 +211,8 @@ def build_profile_command(
     python_executable: str,
     override_duration_seconds: float | None = None,
 ) -> list[str]:
+    if override_duration_seconds is not None and profile in FIXED_EVIDENCE_PROFILES:
+        raise ValueError(f"{profile} is a fixed-duration evidence profile")
     command = [
         python_executable,
         str(Path("scripts") / "soak_test.py"),
@@ -210,13 +229,20 @@ def build_profile_command(
 def profile_thresholds(profile: str) -> dict[str, object]:
     defaults = SOAK_PROFILES[profile]
     expected_duration_seconds = float(defaults["duration_seconds"])
+    interval_seconds = int(defaults["interval_seconds"])
+    targets = int(defaults["targets"])
     return {
         "expected_duration_seconds": expected_duration_seconds,
         "minimum_duration_seconds": expected_duration_seconds * 0.95,
-        "targets": int(defaults["targets"]),
+        "targets": targets,
         "with_ui": bool(defaults["with_ui"]),
-        "interval_seconds": int(defaults["interval_seconds"]),
+        "interval_seconds": interval_seconds,
         "max_active_threads": int(defaults["max_active_threads"]),
+        "max_pending_ping_count": min(targets, 20) + 8,
+        "max_same_target_overlap": 1,
+        "max_cadence_grid_drift_seconds": max(float(interval_seconds) * 0.45, 0.05),
+        "max_cadence_start_gap_seconds": max(float(interval_seconds) * 1.5, 2.0),
+        "max_process_handle_growth": 256,
         "max_memory_growth_mb": float(defaults["max_memory_growth_mb"]),
         "max_cpu_percent": float(defaults["max_cpu_percent"]),
         "max_ui_event_gap_seconds": float(defaults["max_ui_event_gap_seconds"]),
@@ -412,12 +438,50 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 def _evidence_measurements(result: dict[str, Any], summary: dict[str, Any]) -> dict[str, object]:
     return {
+        "evidence_schema_version": _first_present_number(result, summary, key="evidence_schema_version"),
+        "platform": _first_present(result, summary, key="platform"),
         "duration_seconds": _first_present_number(result, summary, key="duration_seconds"),
+        "stopped_cleanly": _first_present(result, summary, key="stopped_cleanly"),
         "max_ui_event_gap_seconds": _first_present_number(result, summary, key="max_ui_event_gap_seconds"),
         "max_ui_event_process_seconds": _first_present_number(result, summary, key="max_ui_event_process_seconds"),
         "active_threads_final": _first_present_number(result, summary, key="active_threads_final"),
         "max_active_threads": _first_present_number(result, summary, key="max_active_threads"),
+        "max_active_ping_count": _first_present_number(result, summary, key="max_active_ping_count"),
+        "max_pending_ping_count": _first_present_number(result, summary, key="max_pending_ping_count"),
         "memory_growth_bytes": _first_present_number(result, summary, key="memory_growth_bytes"),
+        "process_handle_samples": _first_present_number(result, summary, key="process_handle_samples"),
+        "process_handle_count_final": _first_present_number(result, summary, key="process_handle_count_final"),
+        "max_process_handle_count": _first_present_number(result, summary, key="max_process_handle_count"),
+        "process_handle_growth": _first_present_number(result, summary, key="process_handle_growth"),
+        "cadence_target_count": _first_present_number(result, summary, key="cadence_target_count"),
+        "cadence_probe_starts": _first_present_number(result, summary, key="cadence_probe_starts"),
+        "cadence_max_abs_grid_drift_seconds": _first_present_number(
+            result,
+            summary,
+            key="cadence_max_abs_grid_drift_seconds",
+        ),
+        "cadence_max_start_gap_seconds": _first_present_number(
+            result,
+            summary,
+            key="cadence_max_start_gap_seconds",
+        ),
+        "max_same_target_overlap": _first_present_number(result, summary, key="max_same_target_overlap"),
+        "session_resume_verified": _first_present(result, summary, key="session_resume_verified"),
+        "session_loader_wait_completed": _first_present(
+            result,
+            summary,
+            key="session_loader_wait_completed",
+        ),
+        "session_loader_reserved_before_cleanup": _first_present(
+            result,
+            summary,
+            key="session_loader_reserved_before_cleanup",
+        ),
+        "session_loader_released_after_cleanup": _first_present(
+            result,
+            summary,
+            key="session_loader_released_after_cleanup",
+        ),
         "session_log_rows": _first_present_number(result, summary, key="session_log_rows"),
         "session_log_min_expected_rows": _first_present_number(result, summary, key="session_log_min_expected_rows"),
         "session_log_row_delta": _first_present_number(result, summary, key="session_log_row_delta"),
@@ -428,6 +492,7 @@ def _evidence_checks(measurements: dict[str, object], thresholds: dict[str, obje
     memory_limit_mb = _number(thresholds.get("max_memory_growth_mb"))
     memory_limit_bytes = None if memory_limit_mb is None else memory_limit_mb * 1024 * 1024
     return {
+        "evidence_schema_ok": _equal(measurements.get("evidence_schema_version"), 2),
         "duration_ok": _greater_equal(
             measurements.get("duration_seconds"),
             thresholds.get("minimum_duration_seconds"),
@@ -448,7 +513,36 @@ def _evidence_checks(measurements: dict[str, object], thresholds: dict[str, obje
             measurements.get("max_active_threads"),
             thresholds.get("max_active_threads"),
         ),
+        "active_ping_ok": _less_equal(
+            measurements.get("max_active_ping_count"),
+            thresholds.get("max_active_threads"),
+        ),
+        "pending_ping_ok": _less_equal(
+            measurements.get("max_pending_ping_count"),
+            thresholds.get("max_pending_ping_count"),
+        ),
         "memory_growth_ok": _less_equal(measurements.get("memory_growth_bytes"), memory_limit_bytes),
+        "cadence_recorded": _greater_equal(measurements.get("cadence_target_count"), 1),
+        "cadence_drift_ok": _less_equal(
+            measurements.get("cadence_max_abs_grid_drift_seconds"),
+            thresholds.get("max_cadence_grid_drift_seconds"),
+        ),
+        "cadence_gap_ok": _less_equal(
+            measurements.get("cadence_max_start_gap_seconds"),
+            thresholds.get("max_cadence_start_gap_seconds"),
+        ),
+        "same_target_overlap_ok": _less_equal(
+            measurements.get("max_same_target_overlap"),
+            thresholds.get("max_same_target_overlap"),
+        ),
+        "process_handles_ok": _process_handles_ok(measurements, thresholds),
+        "session_resume_ok": _is_true(measurements.get("session_resume_verified")),
+        "session_loader_wait_ok": _is_true(measurements.get("session_loader_wait_completed")),
+        "session_loader_ownership_ok": _all_true(
+            measurements.get("session_loader_reserved_before_cleanup"),
+            measurements.get("session_loader_released_after_cleanup"),
+        ),
+        "clean_shutdown_ok": _is_true(measurements.get("stopped_cleanly")),
         "session_log_ok": _greater_equal(
             measurements.get("session_log_rows"),
             measurements.get("session_log_min_expected_rows"),
@@ -463,6 +557,13 @@ def _first_present_number(*sources: dict[str, Any], key: str) -> int | float | N
         number = _number(value)
         if number is not None:
             return number
+    return None
+
+
+def _first_present(*sources: dict[str, Any], key: str) -> object:
+    for source in sources:
+        if key in source:
+            return source[key]
     return None
 
 
@@ -491,6 +592,40 @@ def _less_equal(value: object, threshold: object) -> bool | None:
     if value_number is None or threshold_number is None:
         return None
     return value_number <= threshold_number
+
+
+def _equal(value: object, expected: object) -> bool | None:
+    if value is None:
+        return None
+    return value == expected
+
+
+def _is_true(value: object) -> bool | None:
+    if value is None:
+        return None
+    return value is True
+
+
+def _all_true(*values: object) -> bool | None:
+    if any(value is None for value in values):
+        return None
+    return all(value is True for value in values)
+
+
+def _process_handles_ok(
+    measurements: dict[str, object],
+    thresholds: dict[str, object],
+) -> bool | None:
+    if measurements.get("platform") != "nt":
+        return None
+    samples_ok = _greater_equal(measurements.get("process_handle_samples"), 1)
+    growth_ok = _less_equal(
+        measurements.get("process_handle_growth"),
+        thresholds.get("max_process_handle_growth"),
+    )
+    if samples_ok is None or growth_ok is None:
+        return None
+    return samples_ok and growth_ok
 
 
 def resolve_recorded_path(value: object, *, manifest_path: Path) -> Path | None:
@@ -535,12 +670,10 @@ def write_manifest(
         "suite_finished_at": finished_at,
         "root": str(ROOT),
         "profiles_requested": profiles,
-        "planned_only": bool(results) and all(
-            (latest_result(profile, results) or {}).get("status") == "planned" for profile in profiles
-        ),
-        "passed": bool(results) and all(
-            (latest_result(profile, results) or {}).get("status") == "passed" for profile in profiles
-        ),
+        "planned_only": bool(results)
+        and all((latest_result(profile, results) or {}).get("status") == "planned" for profile in profiles),
+        "passed": bool(results)
+        and all((latest_result(profile, results) or {}).get("status") == "passed" for profile in profiles),
         "results": results,
     }
     atomic_write_path(

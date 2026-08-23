@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -18,10 +19,11 @@ APP_DISPLAY_NAME = "멀티핑체크"
 APP_BINARY_NAME = "MultiPingCheck"
 PYTEST_TIMEOUT_SECONDS = 600
 
+from app import __version__
 from app.core.models import STATUS_OK, HopObservation, MetricSnapshot
-from app.developer.build_info import BUILD_INFO_FILE_NAME
 from app.core.ping_runner import CommandPingRunner
 from app.core.traceroute import run_traceroute
+from app.developer.build_info import BUILD_INFO_FILE_NAME
 from app.storage.csv_exporter import export_csv
 from app.storage.excel_exporter import export_xlsx
 from app.storage.report_writer import write_text_report
@@ -103,7 +105,30 @@ def run_release_policy_check() -> None:
     build_script = (ROOT / "build_windows_exe.ps1").read_text(encoding="utf-8")
     spec_path = ROOT / f"{APP_BINARY_NAME}.spec"
     spec = spec_path.read_text(encoding="utf-8") if spec_path.exists() else ""
-    requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    runtime_lock_path = ROOT / "requirements.lock"
+    dev_lock_path = ROOT / "requirements-dev.lock"
+    if not runtime_lock_path.is_file() or not dev_lock_path.is_file():
+        raise RuntimeError("Hash-locked runtime and development dependency files are required.")
+    requirements = runtime_lock_path.read_text(encoding="utf-8")
+    dev_requirements = dev_lock_path.read_text(encoding="utf-8")
+    for lock_name, lock_text in (
+        (runtime_lock_path.name, requirements),
+        (dev_lock_path.name, dev_requirements),
+    ):
+        if "--hash=sha256:" not in lock_text:
+            raise RuntimeError(f"Dependency lock is missing SHA-256 hashes: {lock_name}")
+    for windows_dependency in ("pefile==", "pywin32-ctypes=="):
+        marker_pattern = rf"(?m)^{re.escape(windows_dependency)}[^\n]*;\s*sys_platform == ['\"]win32['\"]"
+        if re.search(marker_pattern, dev_requirements) is None:
+            raise RuntimeError(
+                f"Development lock is missing universal Windows packaging dependency: {windows_dependency}"
+            )
+
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    if 'dynamic = ["version"]' not in pyproject or "app.__version__" not in pyproject:
+        raise RuntimeError("pyproject.toml must derive its version from app.__version__.")
+    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", __version__) is None:
+        raise RuntimeError(f"Application version is not a stable semantic version: {__version__}")
 
     forbidden_admin_markers = ("--uac-admin", "requireAdministrator", "highestAvailable")
     combined_build_text = f"{build_script}\n{spec}"
@@ -352,9 +377,7 @@ def run_packaged_size_check(package_dir: Path) -> None:
 def run_packaged_build_info_check(package_dir: Path) -> None:
     metadata_paths = list(package_dir.rglob(BUILD_INFO_FILE_NAME))
     if len(metadata_paths) != 1:
-        raise RuntimeError(
-            f"Packaged app must contain exactly one {BUILD_INFO_FILE_NAME}; found {len(metadata_paths)}"
-        )
+        raise RuntimeError(f"Packaged app must contain exactly one {BUILD_INFO_FILE_NAME}; found {len(metadata_paths)}")
     try:
         payload = json.loads(metadata_paths[0].read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:

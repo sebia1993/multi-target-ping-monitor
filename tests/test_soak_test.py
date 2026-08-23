@@ -69,6 +69,11 @@ def test_soak_long_duration_profiles_define_four_eight_and_twenty_four_hour_runs
     assert twenty_four.max_memory_growth_mb == 256.0
 
 
+def test_soak_long_duration_profiles_reject_shortened_evidence_runs() -> None:
+    with pytest.raises(SystemExit):
+        parse_args(["--profile", "long4h", "--duration-seconds", "30"])
+
+
 def test_soak_ui_profile_drives_offscreen_window_by_default() -> None:
     args = parse_args(["--profile", "ui"])
 
@@ -136,17 +141,19 @@ def test_soak_window_connection_matches_running_main_window_state() -> None:
 
 
 def test_soak_profile_allows_explicit_cli_overrides() -> None:
-    args = parse_args([
-        "--profile",
-        "release",
-        "--duration-seconds",
-        "12",
-        "--targets",
-        "7",
-        "--no-ui",
-        "--max-cpu-percent",
-        "90",
-    ])
+    args = parse_args(
+        [
+            "--profile",
+            "release",
+            "--duration-seconds",
+            "12",
+            "--targets",
+            "7",
+            "--no-ui",
+            "--max-cpu-percent",
+            "90",
+        ]
+    )
 
     assert args.profile == "release"
     assert args.duration_seconds == 12.0
@@ -274,15 +281,151 @@ def test_soak_evaluation_allows_in_flight_pings_at_shutdown() -> None:
     assert evaluate_summary(summary, args) == []
 
 
+def test_soak_evidence_schema_accepts_fixed_cadence_and_session_lifecycle() -> None:
+    args = _args()
+    summary = _summary(
+        updates=1778,
+        diagnostic_samples=1778,
+        max_update_gap_seconds=2.031,
+        avg_update_gap_seconds=1.013,
+    )
+    summary.update(_required_evidence())
+
+    assert evaluate_summary(summary, args) == []
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "session_resume_verified",
+        "session_loader_wait_completed",
+        "session_loader_reserved_before_cleanup",
+        "session_loader_released_after_cleanup",
+    ],
+)
+def test_soak_evidence_schema_fails_closed_when_lifecycle_evidence_is_missing(field) -> None:
+    args = _args()
+    summary = _summary(
+        updates=1778,
+        diagnostic_samples=1778,
+        max_update_gap_seconds=2.031,
+        avg_update_gap_seconds=1.013,
+    )
+    summary.update(_required_evidence())
+    summary[field] = False
+
+    failures = evaluate_summary(summary, args)
+
+    assert f"session lifecycle evidence failed: {field}" in failures
+
+
+def test_soak_evidence_schema_rejects_same_target_overlap_and_missing_cadence() -> None:
+    args = _args()
+    summary = _summary(
+        updates=1778,
+        diagnostic_samples=1778,
+        max_update_gap_seconds=2.031,
+        avg_update_gap_seconds=1.013,
+    )
+    summary.update(_required_evidence())
+    summary["max_same_target_overlap"] = 2
+    summary["cadence_target_count"] = 0
+
+    failures = evaluate_summary(summary, args)
+
+    assert any("same-target probe overlap" in failure for failure in failures)
+    assert "no healthy target cadence evidence was recorded" in failures
+
+
+def test_soak_evidence_schema_rejects_incomplete_cadence_history() -> None:
+    args = _args()
+    summary = _summary(
+        updates=1778,
+        diagnostic_samples=1778,
+        max_update_gap_seconds=2.031,
+        avg_update_gap_seconds=1.013,
+    )
+    summary["cadence_probe_starts"] = 10
+
+    failures = evaluate_summary(summary, args)
+
+    assert any("too few cadence probe starts" in failure for failure in failures)
+
+
+def test_soak_evidence_schema_rejects_unclean_shutdown_and_excessive_drift() -> None:
+    args = _args()
+    summary = _summary(
+        updates=1778,
+        diagnostic_samples=1778,
+        max_update_gap_seconds=2.031,
+        avg_update_gap_seconds=1.013,
+    )
+    summary.update(_required_evidence())
+    summary["stopped_cleanly"] = False
+    summary["cadence_max_abs_grid_drift_seconds"] = 0.75
+    summary["cadence_max_start_gap_seconds"] = 3.0
+
+    failures = evaluate_summary(summary, args)
+
+    assert "worker did not stop cleanly" in failures
+    assert any("cadence grid drift too high" in failure for failure in failures)
+    assert any("cadence start gap too high" in failure for failure in failures)
+
+
+def test_soak_evidence_schema_fails_closed_when_a_required_field_is_absent() -> None:
+    args = _args()
+    summary = _summary(
+        updates=1778,
+        diagnostic_samples=1778,
+        max_update_gap_seconds=2.031,
+        avg_update_gap_seconds=1.013,
+    )
+    summary.pop("cadence_max_start_gap_seconds")
+
+    failures = evaluate_summary(summary, args)
+
+    assert failures == ["required evidence fields missing: cadence_max_start_gap_seconds"]
+
+
+def test_soak_evidence_schema_requires_bounded_windows_handle_evidence() -> None:
+    args = _args()
+    summary = _summary(
+        updates=1778,
+        diagnostic_samples=1778,
+        max_update_gap_seconds=2.031,
+        avg_update_gap_seconds=1.013,
+    )
+    summary["platform"] = "nt"
+
+    missing_failures = evaluate_summary(summary, args)
+
+    assert any("Windows process handle fields missing" in failure for failure in missing_failures)
+
+    summary.update(
+        {
+            "process_handle_samples": 360,
+            "process_handle_count_final": 800,
+            "max_process_handle_count": 800,
+            "process_handle_growth": 300,
+        }
+    )
+
+    growth_failures = evaluate_summary(summary, args)
+
+    assert any("process handle growth too high" in failure for failure in growth_failures)
+
+
 def test_soak_summary_reports_session_log_row_delta(tmp_path) -> None:
-    args = parse_args([
-        "--profile",
-        "release",
-        "--output-dir",
-        str(tmp_path),
-        "--session-log-root",
-        str(tmp_path / "session_logs"),
-    ])
+    args = parse_args(
+        [
+            "--profile",
+            "release",
+            "--output-dir",
+            str(tmp_path),
+            "--session-log-root",
+            str(tmp_path / "session_logs"),
+        ]
+    )
 
     summary = build_summary(
         args=args,
@@ -452,7 +595,7 @@ def _summary(
     max_ui_event_process_seconds: float = 0.075,
 ) -> dict[str, object]:
     completed = ping_calls if ping_results is None else ping_results
-    return {
+    summary = {
         "errors": [],
         "stopped_cleanly": True,
         "updates": updates,
@@ -472,6 +615,28 @@ def _summary(
         "ping_results": completed,
         "session_log_rows": session_log_rows,
         "session_log_segments": session_log_segments,
+    }
+    summary.update(_required_evidence())
+    return summary
+
+
+def _required_evidence() -> dict[str, object]:
+    return {
+        "evidence_schema_version": 2,
+        "platform": "posix",
+        "active_threads_final": 1,
+        "max_active_ping_count": 20,
+        "cadence_target_count": 10,
+        "cadence_probe_starts": 17_780,
+        "cadence_max_abs_grid_drift_seconds": 0.05,
+        "cadence_max_start_gap_seconds": 1.05,
+        "cadence_avg_start_gap_seconds": 1.0,
+        "max_same_target_overlap": 1,
+        "session_resume_verified": True,
+        "session_loader_wait_completed": True,
+        "session_loader_reserved_before_cleanup": True,
+        "session_loader_released_after_cleanup": True,
+        "session_lifecycle_errors": [],
     }
 
 
