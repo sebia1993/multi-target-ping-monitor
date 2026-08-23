@@ -91,6 +91,13 @@ python -m venv .venv
 python -m pip install --require-hashes -r requirements-dev.lock
 ```
 
+`requirements-dev.in`의 직접 pin은 `pyproject.toml`의 `dev` 목록과 같은 버전을 유지하고,
+CI가 두 목록을 hash lock과 대조합니다. `lxml`은 애플리케이션 runtime 의존성이 아니라
+SBOM·의존성 감사 도구가 가져오는 transitive 개발 의존성입니다. `PYSEC-2026-87`의 취약한
+5.x 해석을 막기 위해 patched `6.1.0`을 명시적 개발 constraint로 고정했습니다. 이 버전을
+허용하는 최소 SBOM library인 `cyclonedx-python-lib 10.3.0`과 호환되는 `pip-audit 2.10.1`도
+함께 고정하며, CI는 runtime과 development lock을 각각 `pip-audit`합니다.
+
 빠른 테스트:
 
 ```powershell

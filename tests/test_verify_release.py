@@ -5,6 +5,10 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+import tomllib
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+
 import scripts.verify_release as verify_release
 from app.core.models import STATUS_ERROR, STATUS_OK, HopInfo, MetricSnapshot, PingResult
 
@@ -93,6 +97,24 @@ def test_application_version_has_one_executable_source() -> None:
     ]:
         if path.is_file():
             assert "0.2.0" not in path.read_text(encoding="utf-8-sig"), path
+
+
+def test_direct_development_pins_match_input_lock_and_pyproject() -> None:
+    root = Path(__file__).resolve().parents[1]
+    dev_input_pins = _parse_input_pins(root / "requirements-dev.in")
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    pyproject_dev_pins = _parse_exact_pins(pyproject["project"]["optional-dependencies"]["dev"])
+    dev_lock_pins = _parse_lock_pins(root / "requirements-dev.lock")
+
+    assert dev_input_pins == pyproject_dev_pins
+    assert dev_input_pins.keys() <= dev_lock_pins.keys()
+    assert {name: dev_lock_pins[name] for name in dev_input_pins} == dev_input_pins
+    assert {
+        "cyclonedx-python-lib": "10.3.0",
+        "lxml": "6.1.0",
+        "pip-audit": "2.10.1",
+        "pytest": "9.0.3",
+    }.items() <= dev_input_pins.items()
 
 
 def test_release_policy_rejects_admin_manifest(monkeypatch, tmp_path) -> None:
@@ -298,6 +320,7 @@ def test_ci_workflow_consolidates_quality_and_windows_package_checks() -> None:
     assert "python -m ruff check --select I" in ci
     assert "python -m pytest -q" in ci
     assert "python -m pip_audit -r requirements.lock --require-hashes" in ci
+    assert "python -m pip_audit -r requirements-dev.lock --require-hashes" in ci
     assert "python scripts/scan_secrets.py" in ci
     assert "python scripts\\verify_release.py" in ci
     assert "build_windows_exe.ps1" in ci
@@ -422,3 +445,47 @@ def _write_policy_tree(
         '[project]\ndynamic = ["version"]\n[tool.setuptools.dynamic]\nversion = {attr = "app.__version__"}\n',
         encoding="utf-8",
     )
+
+
+def _parse_input_pins(path: Path) -> dict[str, str]:
+    requirements = []
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith("-r "):
+            continue
+        assert not line.startswith("-"), f"unsupported requirements input directive: {line}"
+        requirements.append(line)
+    return _parse_exact_pins(requirements)
+
+
+def _parse_exact_pins(requirements: list[str]) -> dict[str, str]:
+    pins: dict[str, str] = {}
+    for text in requirements:
+        requirement = Requirement(text)
+        specifiers = list(requirement.specifier)
+        assert requirement.marker is None, f"environment marker is not allowed for a direct development pin: {text}"
+        assert len(specifiers) == 1 and specifiers[0].operator == "==", f"development pin must be exact: {text}"
+        assert "*" not in specifiers[0].version, f"development pin must not use a wildcard: {text}"
+        name = canonicalize_name(requirement.name)
+        assert name not in pins, f"duplicate development pin: {name}"
+        pins[name] = specifiers[0].version
+    assert pins, "no direct development pins found"
+    return pins
+
+
+def _parse_lock_pins(path: Path) -> dict[str, str]:
+    pin_pattern = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_.-]*)==([^\\\s;]+)(?:\s*;[^\\]+)?\s*\\?$")
+    pins: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith("--hash"):
+            continue
+        if "==" not in line:
+            continue
+        match = pin_pattern.fullmatch(line)
+        assert match is not None, f"unparseable lock pin: {line}"
+        name = canonicalize_name(match.group(1))
+        assert name not in pins, f"duplicate lock pin: {name}"
+        pins[name] = match.group(2)
+    assert pins, "no lock pins found"
+    return pins
