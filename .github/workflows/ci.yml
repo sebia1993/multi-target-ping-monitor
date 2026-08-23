@@ -84,8 +84,10 @@ jobs:
       - name: Run test suite
         run: python -m pytest -q
 
-      - name: Audit runtime dependency lock
-        run: python -m pip_audit -r requirements.lock --require-hashes --progress-spinner=off
+      - name: Audit runtime and development dependency locks
+        run: |
+          python -m pip_audit -r requirements.lock --require-hashes --progress-spinner=off
+          python -m pip_audit -r requirements-dev.lock --require-hashes --progress-spinner=off
 
       - name: Scan tracked text for high-confidence secrets
         run: python scripts/scan_secrets.py
