@@ -18,6 +18,7 @@
 - 늦어진 측정은 누락 slot을 한 번에 몰아 실행하지 않고 다음 미래 slot으로 전진
 - PR/main 검증을 `CI` workflow의 Linux quality/security와 Windows package gate로 통합
 - GitHub-hosted Windows에서 실제 14,400초 `long4h` soak를 실행할 수 있도록 증거 schema 강화
+- Release가 실행 대기 중 바뀐 `main`을 따라가지 않도록 dispatch 시점의 정확한 commit SHA로 checkout 고정
 
 ### 보안
 

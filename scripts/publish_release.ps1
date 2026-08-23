@@ -84,15 +84,25 @@ if (-not $SkipUpload) {
     }
 }
 
-# 브랜치와 origin remote가 없으면 GitHub에 어떤 위치로 올릴지 알 수 없으므로 중단합니다.
+# GitHub Actions의 packaging 단계는 dispatch 시점 SHA를 detached HEAD로 checkout합니다.
+# 로컬 upload는 push 대상이 명확해야 하므로 계속 normal branch만 허용합니다.
 $Branch = (& git rev-parse --abbrev-ref HEAD).Trim()
-if ($LASTEXITCODE -ne 0 -or -not $Branch -or $Branch -eq "HEAD") {
+if ($LASTEXITCODE -ne 0 -or -not $Branch) {
+    throw "Could not determine the current Git checkout state."
+}
+$DetachedHead = $Branch -eq "HEAD"
+if ($DetachedHead -and -not $SkipUpload) {
     throw "Release publishing requires a normal checked-out branch."
 }
+if ($DetachedHead) {
+    $Branch = "detached"
+}
 
-$Remote = (& git remote get-url origin).Trim()
-if ($LASTEXITCODE -ne 0 -or -not $Remote) {
-    throw "Git remote 'origin' was not found."
+if (-not $SkipUpload) {
+    $Remote = (& git remote get-url origin).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $Remote) {
+        throw "Git remote 'origin' was not found."
+    }
 }
 
 $Status = (& git status --porcelain)
