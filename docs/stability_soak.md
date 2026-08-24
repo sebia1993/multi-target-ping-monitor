@@ -93,6 +93,8 @@ GitHub-hosted Windows runner는 짧은 확인이나 4시간 이하 검증에 적
 
 `long4h` 증거는 `override_duration_seconds` 없이 정확히 14,400초를 요청해야 합니다. schema v3 필수 값이 없거나 대상 coverage/cadence/lifecycle/overlap/종료 gate가 실패하면 workflow도 실패합니다. 실패 시에도 원인 분석을 위해 artifact는 업로드하지만, 해당 결과는 Release 증거로 사용할 수 없습니다.
 
+헤드리스 profile도 Qt 신호 queue를 실제로 처리하되 호출당 10ms budget을 적용합니다. 이렇게 하면 한 번의 무제한 event drain이 Python GIL을 오래 점유해 측정 스케줄러의 due-to-submit cadence를 왜곡할 위험을 줄이면서, 이벤트 루프 정지 여부는 계속 독립 측정합니다.
+
 UI 10/20/50 profile은 `max_ui_event_gap_seconds`와
 `max_ui_event_process_seconds`가 0.2초 이하인지 확인합니다.
 

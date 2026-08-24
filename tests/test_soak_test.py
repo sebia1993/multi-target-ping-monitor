@@ -13,6 +13,7 @@ from scripts import soak_test as soak_test_module
 from scripts.soak_test import (
     EVIDENCE_SCHEMA_VERSION,
     EventLoopStats,
+    HEADLESS_EVENT_PROCESS_BUDGET_MS,
     ProbeCadenceEvidence,
     SimulatedPingRunner,
     build_summary,
@@ -20,6 +21,7 @@ from scripts.soak_test import (
     evaluate_summary,
     minimum_probe_starts_per_target,
     parse_args,
+    process_application_events,
     write_diagnostics_csv,
     write_health_csv,
     write_summary_json,
@@ -47,7 +49,7 @@ def test_soak_release_profile_sets_fast_fifty_target_defaults() -> None:
     assert args.progress_seconds == 0.0
     assert args.max_cpu_percent == 250.0
     assert args.with_ui is False
-    assert args.event_process_max_milliseconds == 0
+    assert args.event_process_max_milliseconds == HEADLESS_EVENT_PROCESS_BUDGET_MS
     assert args.max_ui_event_process_seconds == 2.0
 
 
@@ -73,6 +75,34 @@ def test_soak_long_duration_profiles_define_four_eight_and_twenty_four_hour_runs
     assert twenty_four.duration_seconds == 86_400.0
     assert {four.targets, eight.targets, twenty_four.targets} == {50}
     assert twenty_four.max_memory_growth_mb == 256.0
+    assert {
+        four.event_process_max_milliseconds,
+        eight.event_process_max_milliseconds,
+        twenty_four.event_process_max_milliseconds,
+    } == {HEADLESS_EVENT_PROCESS_BUDGET_MS}
+
+
+def test_headless_profiles_bound_each_qt_event_drain() -> None:
+    for profile in ("default", "release", "long", "long4h", "long8h", "long24h"):
+        args = parse_args(["--profile", profile])
+
+        assert args.with_ui is False
+        assert args.event_process_max_milliseconds == HEADLESS_EVENT_PROCESS_BUDGET_MS
+
+
+def test_process_application_events_uses_bounded_qt_overload() -> None:
+    from PySide6.QtCore import QEventLoop
+
+    calls: list[tuple[object, ...]] = []
+    app = SimpleNamespace(processEvents=lambda *args: calls.append(args))
+
+    process_application_events(app, HEADLESS_EVENT_PROCESS_BUDGET_MS)
+    process_application_events(app, 0)
+
+    assert calls == [
+        (QEventLoop.ProcessEventsFlag.AllEvents, HEADLESS_EVENT_PROCESS_BUDGET_MS),
+        (),
+    ]
 
 
 def test_soak_long_duration_profiles_reject_shortened_evidence_runs() -> None:

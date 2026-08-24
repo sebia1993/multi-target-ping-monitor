@@ -38,6 +38,7 @@ TOP_EVENT_SAMPLE_LIMIT = 10
 EVIDENCE_SCHEMA_VERSION = 3
 MIN_PROBE_COVERAGE_RATIO = 0.8
 FIXED_DURATION_PROFILES = frozenset({"long4h", "long8h", "long24h"})
+HEADLESS_EVENT_PROCESS_BUDGET_MS = 10
 
 
 @dataclass
@@ -214,7 +215,7 @@ SOAK_PROFILES: dict[str, dict[str, object]] = {
         "timeout_delay_seconds": 1.5,
         "with_ui": False,
         "event_poll_seconds": 0.05,
-        "event_process_max_milliseconds": 0,
+        "event_process_max_milliseconds": HEADLESS_EVENT_PROCESS_BUDGET_MS,
         "sample_seconds": 1.0,
         "progress_seconds": 60.0,
         "max_ui_event_gap_seconds": 2.0,
@@ -231,7 +232,7 @@ SOAK_PROFILES: dict[str, dict[str, object]] = {
         "timeout_delay_seconds": 0.05,
         "with_ui": False,
         "event_poll_seconds": 0.02,
-        "event_process_max_milliseconds": 0,
+        "event_process_max_milliseconds": HEADLESS_EVENT_PROCESS_BUDGET_MS,
         "sample_seconds": 0.5,
         "progress_seconds": 0.0,
         "max_ui_event_gap_seconds": 2.0,
@@ -248,7 +249,7 @@ SOAK_PROFILES: dict[str, dict[str, object]] = {
         "timeout_delay_seconds": 1.5,
         "with_ui": False,
         "event_poll_seconds": 0.05,
-        "event_process_max_milliseconds": 0,
+        "event_process_max_milliseconds": HEADLESS_EVENT_PROCESS_BUDGET_MS,
         "sample_seconds": 1.0,
         "progress_seconds": 60.0,
         "max_ui_event_gap_seconds": 2.0,
@@ -265,7 +266,7 @@ SOAK_PROFILES: dict[str, dict[str, object]] = {
         "timeout_delay_seconds": 1.5,
         "with_ui": False,
         "event_poll_seconds": 0.05,
-        "event_process_max_milliseconds": 0,
+        "event_process_max_milliseconds": HEADLESS_EVENT_PROCESS_BUDGET_MS,
         "sample_seconds": 5.0,
         "progress_seconds": 300.0,
         "max_ui_event_gap_seconds": 2.0,
@@ -282,7 +283,7 @@ SOAK_PROFILES: dict[str, dict[str, object]] = {
         "timeout_delay_seconds": 1.5,
         "with_ui": False,
         "event_poll_seconds": 0.05,
-        "event_process_max_milliseconds": 0,
+        "event_process_max_milliseconds": HEADLESS_EVENT_PROCESS_BUDGET_MS,
         "sample_seconds": 10.0,
         "progress_seconds": 600.0,
         "max_ui_event_gap_seconds": 2.0,
@@ -299,7 +300,7 @@ SOAK_PROFILES: dict[str, dict[str, object]] = {
         "timeout_delay_seconds": 1.5,
         "with_ui": False,
         "event_poll_seconds": 0.05,
-        "event_process_max_milliseconds": 0,
+        "event_process_max_milliseconds": HEADLESS_EVENT_PROCESS_BUDGET_MS,
         "sample_seconds": 30.0,
         "progress_seconds": 1800.0,
         "max_ui_event_gap_seconds": 2.0,
