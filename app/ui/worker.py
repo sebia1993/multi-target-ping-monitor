@@ -54,7 +54,9 @@ from app.utils.validators import parse_ipv4_targets, validate_target
 # 제한값을 한곳에 모아 둡니다. 숫자를 바꾸면 성능과 안정성에 직접 영향이 있습니다.
 MAX_IPV4_TARGETS = 50
 RECENT_OBSERVATION_LIMIT = 300
-MAX_TARGET_PING_WORKERS = 20
+# 50개 대상/80% timeout 부하에서도 10개 정상 대상의 1초 cadence를 한 번에
+# 제출하면서, timeout 대상에는 기존 처리 용량 15개를 그대로 남깁니다.
+MAX_TARGET_PING_WORKERS = 25
 MAX_HOP_PING_WORKERS = 4
 FINAL_TARGET_DRAIN_GRACE_SECONDS = 1.0
 WORKER_POLL_SECONDS = 0.05
@@ -583,6 +585,8 @@ class MeasurementWorker(QThread):
     def run(self) -> None:
         """Qt가 별도 스레드에서 호출하는 메인 측정 루프입니다."""
 
+        self._prefer_cadence_thread_priority()
+
         # 사용자가 입력한 값은 이 지점에서 다시 IPv4 목록으로 검증합니다.
         # GUI 검증을 통과했더라도 작업자 스레드에서 한 번 더 막아야 저장/측정 로직이 안전합니다.
         targets, invalid = parse_ipv4_targets("\n".join(self.targets or [self.target]))
@@ -1039,7 +1043,10 @@ class MeasurementWorker(QThread):
             for target in targets
             if not self._is_target_paused(target) and target_states[target].last_status == STATUS_OK
         )
-        responsive_reserve = min(responsive_targets, max(worker_limit // 4, 1)) if worker_limit else 0
+        # 정상 대상은 같은 due wave에서 executor completion을 기다리지 않고 모두
+        # 제출할 수 있게 절반의 slot을 먼저 보존합니다. timeout 작업이 순간적으로
+        # 늦어져도 정상 대상 cadence가 그 완료 시각에 종속되지 않습니다.
+        responsive_reserve = min(responsive_targets, max(worker_limit // 2, 1)) if worker_limit else 0
         nonresponsive_capacity = max(worker_limit - responsive_reserve, 0)
         active_nonresponsive = sum(
             1
@@ -1076,6 +1083,12 @@ class MeasurementWorker(QThread):
             if capacity == 0:
                 break
         return scheduled
+
+    def _prefer_cadence_thread_priority(self) -> None:
+        """Give the mostly-waiting scheduler precedence over UI/background bursts."""
+
+        if self.isRunning():
+            self.setPriority(QThread.Priority.HighPriority)
 
     def _schedule_hop_pings(
         self,
