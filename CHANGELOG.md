@@ -16,7 +16,8 @@
 
 - 대상 측정 주기를 ping 완료 시각 기준에서 예정 due-time 기준으로 변경
 - 늦어진 측정은 누락 slot을 한 번에 몰아 실행하지 않고 다음 미래 slot으로 전진
-- timeout이 많은 경우에도 확인된 정상 대상을 먼저 실행하고, 미확인·실패 작업이 공용 executor를 모두 점유하지 않도록 bounded capacity를 예약
+- timeout이 많은 경우에도 확인된 정상 대상을 먼저 실행하고, 정상 대상 10개를 한 due wave에 제출할 수 있도록 15개 timeout 처리 용량과 별도의 bounded capacity를 예약
+- 측정 스케줄러 QThread에 높은 우선순위를 요청해 Windows의 UI·백그라운드 작업 burst가 1초 cadence를 밀어내는 위험 완화
 - tracert 갱신 주기를 완료 시각이 아니라 고정 due-time 기준으로 전진해 장시간 누적 drift와 종료 경계 누락 방지
 - 장시간 증거를 schema v3로 올리고 모든 대상의 실제 probe 시작 횟수를 80% slow-backoff floor로 fail-closed 검증
 - PR/main 검증을 `CI` workflow의 Linux quality/security와 Windows package gate로 통합

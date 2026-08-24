@@ -777,6 +777,68 @@ def test_scheduler_reserves_capacity_and_prioritizes_responsive_targets(monkeypa
     assert all(event[0] in responsive_targets for event in observed)
 
 
+def test_scheduler_submits_ten_responsive_targets_in_one_due_wave(monkeypatch) -> None:
+    monkeypatch.setattr(worker_module, "MAX_TARGET_PING_WORKERS", 25)
+    timeout_targets = [f"198.51.100.{index}" for index in range(1, 41)]
+    responsive_targets = [f"198.51.100.{index}" for index in range(41, 51)]
+    targets = timeout_targets + responsive_targets
+    worker = MeasurementWorker(
+        targets[0],
+        interval_seconds=1,
+        max_cycles=None,
+        targets=targets,
+    )
+    states: dict[str, TargetProbeState] = {}
+    for target in targets:
+        state = TargetProbeState(target)
+        state.configured_interval_seconds = 1
+        state.current_interval_seconds = 1
+        state.next_due = 100.0
+        if target in timeout_targets:
+            state.consecutive_failures = 10
+            state.current_interval_seconds = 5
+            state.last_status = STATUS_TIMEOUT
+        else:
+            state.last_status = STATUS_OK
+        states[target] = state
+
+    class PendingExecutor:
+        def __init__(self) -> None:
+            self.targets: list[str] = []
+
+        def submit(self, _callback, target: str) -> Future[PingResult]:
+            self.targets.append(target)
+            return Future()
+
+    executor = PendingExecutor()
+    active_targets = set(timeout_targets[:15])
+    futures: dict[Future[PingResult], TargetProbeState] = {}
+
+    scheduled = worker._schedule_target_pings(executor, futures, active_targets, states, now=100.0)
+
+    assert scheduled == set(responsive_targets)
+    assert executor.targets == responsive_targets
+
+
+def test_measurement_scheduler_requests_high_thread_priority() -> None:
+    class PriorityWorker(MeasurementWorker):
+        def __init__(self) -> None:
+            super().__init__("198.51.100.1", interval_seconds=1, max_cycles=1)
+            self.requested_priority = None
+
+        def isRunning(self) -> bool:
+            return True
+
+        def setPriority(self, priority) -> None:
+            self.requested_priority = priority
+
+    worker = PriorityWorker()
+
+    worker._prefer_cadence_thread_priority()
+
+    assert worker.requested_priority == worker_module.QThread.Priority.HighPriority
+
+
 def test_scheduler_does_not_resubmit_interval_zero_target_within_same_round() -> None:
     target = "198.51.100.10"
     worker = MeasurementWorker(
