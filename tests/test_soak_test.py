@@ -12,8 +12,8 @@ from app.storage import atomic_write as atomic_write_module
 from scripts import soak_test as soak_test_module
 from scripts.soak_test import (
     EVIDENCE_SCHEMA_VERSION,
-    EventLoopStats,
     HEADLESS_EVENT_PROCESS_BUDGET_MS,
+    EventLoopStats,
     ProbeCadenceEvidence,
     SimulatedPingRunner,
     build_summary,
