@@ -271,6 +271,38 @@ def test_probe_cadence_keeps_bounded_timestamped_top_lateness_samples() -> None:
     assert all(sample["target"] != "198.51.100.50" for sample in samples)
 
 
+def test_probe_cadence_skips_timestamp_work_for_non_top_candidate(monkeypatch) -> None:
+    evidence = ProbeCadenceEvidence(1.0)
+    for index in range(10):
+        scheduled_due = 100.0 + index
+        evidence.scheduled(
+            f"198.51.100.{index + 1}",
+            scheduled_due=scheduled_due,
+            started_at=scheduled_due + 1.0 + index / 10,
+            interval_seconds=1.0,
+            include_in_cadence=True,
+            observed_at_iso=f"2026-08-25T00:00:{index:02d}.000+00:00",
+        )
+
+    class UnexpectedDatetime:
+        @classmethod
+        def now(cls):
+            raise AssertionError("non-top cadence sample must not format a wall timestamp")
+
+    monkeypatch.setattr(soak_test_module, "datetime", UnexpectedDatetime)
+    evidence.scheduled(
+        "198.51.100.50",
+        scheduled_due=200.0,
+        started_at=200.01,
+        interval_seconds=1.0,
+        include_in_cadence=True,
+    )
+
+    samples = evidence.summary()["top_cadence_due_lateness_samples"]
+    assert len(samples) == 10
+    assert all(sample["target"] != "198.51.100.50" for sample in samples)
+
+
 def test_probe_cadence_accepts_intentionally_skipped_due_slots_without_drift() -> None:
     evidence = ProbeCadenceEvidence(1.0)
     for due in (100.0, 104.0):

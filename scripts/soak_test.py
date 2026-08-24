@@ -80,6 +80,12 @@ class ProbeCadenceEvidence:
             # 직접 재면 missed slot 전체 지연과 scheduler starvation이 보존됩니다.
             lateness_seconds = max(started_at - scheduled_due, 0.0)
             self.max_abs_grid_drift_seconds = max(self.max_abs_grid_drift_seconds, lateness_seconds)
+            if not _would_enter_top_samples(
+                self.top_due_lateness_samples,
+                value=lateness_seconds,
+                key="lateness_seconds",
+            ):
+                return
             sample: dict[str, object] = {
                 "target": target,
                 "lateness_seconds": lateness_seconds,
@@ -88,8 +94,9 @@ class ProbeCadenceEvidence:
             }
             if elapsed_seconds is not None:
                 sample["elapsed_seconds"] = elapsed_seconds
-            if observed_at_iso is not None:
-                sample["observed_at_iso"] = observed_at_iso
+            sample["observed_at_iso"] = observed_at_iso or datetime.now().astimezone().isoformat(
+                timespec="milliseconds"
+            )
             _keep_top_samples(
                 self.top_due_lateness_samples,
                 sample,
@@ -117,7 +124,7 @@ class ProbeCadenceEvidence:
         with self.lock:
             self.active_calls[target] = max(self.active_calls.get(target, 1) - 1, 0)
 
-    def summary(self) -> dict[str, int | float]:
+    def summary(self) -> dict[str, object]:
         with self.lock:
             cadence_targets = len(self.scheduled_due_anchors)
             cadence_calls = sum(self.call_counts.get(target, 0) for target in self.scheduled_due_anchors)
@@ -217,11 +224,22 @@ class EventLoopStats:
         }
 
 
+def _would_enter_top_samples(
+    samples: list[dict[str, object]],
+    *,
+    value: float,
+    key: str,
+) -> bool:
+    if len(samples) < TOP_EVIDENCE_SAMPLE_LIMIT:
+        return True
+    current_floor = float(samples[-1].get(key, 0.0) or 0.0)
+    return value > current_floor
+
+
 def _keep_top_samples(samples: list[dict[str, object]], sample: dict[str, object], *, key: str) -> None:
-    if len(samples) >= TOP_EVIDENCE_SAMPLE_LIMIT:
-        current_floor = float(samples[-1].get(key, 0.0) or 0.0)
-        if float(sample.get(key, 0.0) or 0.0) <= current_floor:
-            return
+    sample_value = float(sample.get(key, 0.0) or 0.0)
+    if not _would_enter_top_samples(samples, value=sample_value, key=key):
+        return
     samples.append(sample)
     samples.sort(key=lambda row: float(row.get(key, 0.0) or 0.0), reverse=True)
     del samples[TOP_EVIDENCE_SAMPLE_LIMIT:]
@@ -449,9 +467,6 @@ def main() -> int:
             interval_seconds=interval_seconds,
             include_in_cadence=include_in_cadence,
             elapsed_seconds=(submitted_at - soak_started_at if soak_started_at is not None else None),
-            observed_at_iso=(
-                datetime.now().astimezone().isoformat(timespec="milliseconds") if include_in_cadence else None
-            ),
         )
 
     def ping_factory(timeout_ms: int) -> SimulatedPingRunner:
@@ -902,7 +917,7 @@ def build_summary(
     diagnostics_csv_path: Path,
     health_csv_path: Path,
     stopped_cleanly: bool,
-    cadence_evidence: dict[str, int | float] | None = None,
+    cadence_evidence: dict[str, object] | None = None,
     lifecycle_evidence: dict[str, object] | None = None,
 ) -> dict[str, Any]:
     # raw 샘플을 그대로 읽기 어렵기 때문에, 실패 판단에 필요한 최댓값과 평균값만 요약합니다.

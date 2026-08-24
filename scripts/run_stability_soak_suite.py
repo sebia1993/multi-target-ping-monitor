@@ -475,6 +475,11 @@ def _evidence_measurements(result: dict[str, Any], summary: dict[str, Any]) -> d
             summary,
             key="cadence_max_abs_grid_drift_seconds",
         ),
+        "top_cadence_due_lateness_samples": _first_present(
+            result,
+            summary,
+            key="top_cadence_due_lateness_samples",
+        ),
         "cadence_max_start_gap_seconds": _first_present_number(
             result,
             summary,
