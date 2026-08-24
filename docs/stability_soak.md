@@ -56,7 +56,10 @@ GitHub 저장소에서 다음 메뉴를 사용합니다.
 - 4시간 확인: `long4h`
 - 8시간/24시간 확인: `long8h long24h`
 
-GitHub-hosted Windows runner는 짧은 확인이나 4시간 이하 검증에 적합합니다.
+GitHub-hosted Windows의 엄격한 cadence 검증은 moving `windows-latest` alias가
+아닌 고정 `windows-2022` image에서 실행합니다. 일반 CI와 Release packaging은
+`windows-latest`를 계속 사용해 최신 Windows 호환성도 별도로 확인합니다.
+GitHub-hosted runner는 짧은 확인이나 4시간 이하 검증에 적합합니다.
 8시간/24시간 검증은 `self-hosted-windows` runner 또는 로컬 PC에서 실행하는
 방식을 권장합니다.
 
@@ -82,6 +85,7 @@ GitHub-hosted Windows runner는 짧은 확인이나 4시간 이하 검증에 적
 - `max_pending_ping_count`: 대기 중 ping이 계속 쌓이지 않았는지
 - `max_log_queue_depth`: 세션 로그 저장 queue가 밀리지 않았는지
 - `cadence_max_abs_grid_drift_seconds`: Worker가 선택한 현재 due에서 executor submit까지의 실제 lateness(놓친 slot 지연을 반올림으로 숨기지 않음)
+- `top_cadence_due_lateness_samples`: 가장 늦은 10개 submit의 대상, due/submit monotonic 시각, 실행 경과, wall-clock 시각. 공유 runner 일시 정지와 애플리케이션 병목을 구분하는 원인 분석 증거
 - `cadence_probe_starts` / `cadence_max_start_gap_seconds`: 정상 대상 runner가 실제 시작한 횟수와 시작 간 최대 gap
 - `probe_target_count`: 설정한 모든 대상에서 runner 시작이 실제 관측됐는지
 - `probe_min_starts_per_target` / `probe_max_starts_per_target`: 대상별 실제 시작 횟수 범위. 최소값은 5초 slow-backoff 기준 기대 횟수의 80% 이상이어야 함
@@ -92,6 +96,10 @@ GitHub-hosted Windows runner는 짧은 확인이나 4시간 이하 검증에 적
 - `session_loader_reserved_before_cleanup` / `session_loader_released_after_cleanup`: loader가 owner cleanup 전후 올바르게 소유되는지
 
 `long4h` 증거는 `override_duration_seconds` 없이 정확히 14,400초를 요청해야 합니다. schema v3 필수 값이 없거나 대상 coverage/cadence/lifecycle/overlap/종료 gate가 실패하면 workflow도 실패합니다. 실패 시에도 원인 분석을 위해 artifact는 업로드하지만, 해당 결과는 Release 증거로 사용할 수 없습니다.
+
+공유 GitHub-hosted VM이 일시적으로 deschedule되어도 cadence 임계값을 완화하거나
+누락 due를 다시 anchor하지 않습니다. 고정 image에서도 같은 host-wide pause가 반복되면
+해당 실행은 그대로 실패 처리하고 전용 self-hosted Windows runner에서 증거를 다시 수집합니다.
 
 헤드리스 profile도 Qt 신호 queue를 실제로 처리하되 호출당 10ms budget을 적용합니다. 이렇게 하면 한 번의 무제한 event drain이 Python GIL을 오래 점유해 측정 스케줄러의 due-to-submit cadence를 왜곡할 위험을 줄이면서, 이벤트 루프 정지 여부는 계속 독립 측정합니다.
 

@@ -227,6 +227,50 @@ def test_probe_cadence_uses_direct_due_lateness_instead_of_nearest_start() -> No
     assert summary["cadence_probe_starts"] == 2
 
 
+def test_probe_cadence_keeps_bounded_timestamped_top_lateness_samples() -> None:
+    evidence = ProbeCadenceEvidence(1.0)
+    for index in range(12):
+        target = f"198.51.100.{index + 1}"
+        scheduled_due = 100.0 + index
+        lateness = index / 10
+        evidence.scheduled(
+            target,
+            scheduled_due=scheduled_due,
+            started_at=scheduled_due + lateness,
+            interval_seconds=1.0,
+            include_in_cadence=True,
+            elapsed_seconds=float(index),
+            observed_at_iso=f"2026-08-25T00:00:{index:02d}.000+00:00",
+        )
+
+    evidence.scheduled(
+        "198.51.100.50",
+        scheduled_due=200.0,
+        started_at=205.0,
+        interval_seconds=1.0,
+        include_in_cadence=False,
+        elapsed_seconds=100.0,
+        observed_at_iso="2026-08-25T00:01:40.000+00:00",
+    )
+    summary = evidence.summary()
+    samples = summary["top_cadence_due_lateness_samples"]
+
+    assert summary["cadence_max_abs_grid_drift_seconds"] == pytest.approx(1.1)
+    assert len(samples) == 10
+    assert samples[0]["lateness_seconds"] == summary["cadence_max_abs_grid_drift_seconds"]
+    assert [sample["lateness_seconds"] for sample in samples] == sorted(
+        (sample["lateness_seconds"] for sample in samples),
+        reverse=True,
+    )
+    assert samples[0]["target"] == "198.51.100.12"
+    assert samples[0]["lateness_seconds"] == pytest.approx(1.1)
+    assert samples[0]["scheduled_due_monotonic"] == pytest.approx(111.0)
+    assert samples[0]["submitted_at_monotonic"] == pytest.approx(112.1)
+    assert samples[0]["elapsed_seconds"] == pytest.approx(11.0)
+    assert samples[0]["observed_at_iso"] == "2026-08-25T00:00:11.000+00:00"
+    assert all(sample["target"] != "198.51.100.50" for sample in samples)
+
+
 def test_probe_cadence_accepts_intentionally_skipped_due_slots_without_drift() -> None:
     evidence = ProbeCadenceEvidence(1.0)
     for due in (100.0, 104.0):

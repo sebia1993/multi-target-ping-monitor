@@ -642,7 +642,11 @@ def test_manual_stability_soak_blocks_long_profiles_on_github_hosted_windows() -
     text = (ROOT / ".github" / "workflows" / "stability-soak.yml").read_text(encoding="utf-8")
 
     github_hosted_job = text.split("  self_hosted_windows:", maxsplit=1)[0]
+    self_hosted_job = text.split("  self_hosted_windows:", maxsplit=1)[1]
 
+    assert "runs-on: windows-2022" in github_hosted_job
+    assert "\n    runs-on: windows-latest" not in github_hosted_job
+    assert "runs-on: [self-hosted, Windows]" in self_hosted_job
     assert "long8h" in github_hosted_job
     assert "long24h" in github_hosted_job
     assert "runner_mode=self-hosted-windows" in github_hosted_job

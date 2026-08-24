@@ -36,7 +36,10 @@ jobs:
   github_hosted_windows:
     if: ${{ inputs.runner_mode == 'github-hosted-windows' }}
     name: GitHub-hosted Windows soak
-    runs-on: windows-latest
+    # Keep strict timing evidence on a fixed GA image instead of following the
+    # moving windows-latest alias. General CI and release packaging still cover
+    # windows-latest separately.
+    runs-on: windows-2022
     timeout-minutes: 360
     env:
       QT_QPA_PLATFORM: offscreen
