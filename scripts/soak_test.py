@@ -34,7 +34,7 @@ from app.ui.worker import (
 
 # soak test는 "오래 돌려도 멈추지 않는지" 보는 안정성 테스트입니다.
 # 실제 IP를 때리지 않고 가짜 ping 응답을 만들어, timeout이 많은 환경을 안전하게 재현합니다.
-TOP_EVENT_SAMPLE_LIMIT = 10
+TOP_EVIDENCE_SAMPLE_LIMIT = 10
 EVIDENCE_SCHEMA_VERSION = 3
 MIN_PROBE_COVERAGE_RATIO = 0.8
 FIXED_DURATION_PROFILES = frozenset({"long4h", "long8h", "long24h"})
@@ -56,6 +56,7 @@ class ProbeCadenceEvidence:
     max_start_gap_seconds: float = 0.0
     total_start_gap_seconds: float = 0.0
     start_gap_count: int = 0
+    top_due_lateness_samples: list[dict[str, object]] = field(default_factory=list)
 
     def scheduled(
         self,
@@ -65,6 +66,8 @@ class ProbeCadenceEvidence:
         started_at: float,
         interval_seconds: float,
         include_in_cadence: bool,
+        elapsed_seconds: float | None = None,
+        observed_at_iso: str | None = None,
     ) -> None:
         """Record the worker's due slot and submit time before executor hand-off."""
 
@@ -75,9 +78,29 @@ class ProbeCadenceEvidence:
             # nearest-slot round는 실제 지연을 다음 slot 쪽으로 접어 interval/2
             # 이하로 숨깁니다. Worker가 선택한 현재 due에 대한 submit lateness를
             # 직접 재면 missed slot 전체 지연과 scheduler starvation이 보존됩니다.
-            self.max_abs_grid_drift_seconds = max(
-                self.max_abs_grid_drift_seconds,
-                max(started_at - scheduled_due, 0.0),
+            lateness_seconds = max(started_at - scheduled_due, 0.0)
+            self.max_abs_grid_drift_seconds = max(self.max_abs_grid_drift_seconds, lateness_seconds)
+            if not _would_enter_top_samples(
+                self.top_due_lateness_samples,
+                value=lateness_seconds,
+                key="lateness_seconds",
+            ):
+                return
+            sample: dict[str, object] = {
+                "target": target,
+                "lateness_seconds": lateness_seconds,
+                "scheduled_due_monotonic": scheduled_due,
+                "submitted_at_monotonic": started_at,
+            }
+            if elapsed_seconds is not None:
+                sample["elapsed_seconds"] = elapsed_seconds
+            sample["observed_at_iso"] = observed_at_iso or datetime.now().astimezone().isoformat(
+                timespec="milliseconds"
+            )
+            _keep_top_samples(
+                self.top_due_lateness_samples,
+                sample,
+                key="lateness_seconds",
             )
 
     def started(self, target: str, *, started_at: float | None = None) -> None:
@@ -101,7 +124,7 @@ class ProbeCadenceEvidence:
         with self.lock:
             self.active_calls[target] = max(self.active_calls.get(target, 1) - 1, 0)
 
-    def summary(self) -> dict[str, int | float]:
+    def summary(self) -> dict[str, object]:
         with self.lock:
             cadence_targets = len(self.scheduled_due_anchors)
             cadence_calls = sum(self.call_counts.get(target, 0) for target in self.scheduled_due_anchors)
@@ -117,6 +140,7 @@ class ProbeCadenceEvidence:
                 "cadence_avg_start_gap_seconds": (
                     self.total_start_gap_seconds / self.start_gap_count if self.start_gap_count else 0.0
                 ),
+                "top_cadence_due_lateness_samples": list(self.top_due_lateness_samples),
                 "max_same_target_overlap": self.max_same_target_overlap,
             }
 
@@ -200,10 +224,25 @@ class EventLoopStats:
         }
 
 
+def _would_enter_top_samples(
+    samples: list[dict[str, object]],
+    *,
+    value: float,
+    key: str,
+) -> bool:
+    if len(samples) < TOP_EVIDENCE_SAMPLE_LIMIT:
+        return True
+    current_floor = float(samples[-1].get(key, 0.0) or 0.0)
+    return value > current_floor
+
+
 def _keep_top_samples(samples: list[dict[str, object]], sample: dict[str, object], *, key: str) -> None:
+    sample_value = float(sample.get(key, 0.0) or 0.0)
+    if not _would_enter_top_samples(samples, value=sample_value, key=key):
+        return
     samples.append(sample)
     samples.sort(key=lambda row: float(row.get(key, 0.0) or 0.0), reverse=True)
-    del samples[TOP_EVENT_SAMPLE_LIMIT:]
+    del samples[TOP_EVIDENCE_SAMPLE_LIMIT:]
 
 
 SOAK_PROFILES: dict[str, dict[str, object]] = {
@@ -411,20 +450,23 @@ def main() -> int:
     timeout_start_index = max(1, round(args.targets * (1 - args.timeout_ratio)) + 1)
     traceroute_probe = StableTracerouteProbe()
     cadence_evidence = ProbeCadenceEvidence(float(args.interval_seconds))
+    soak_started_at: float | None = None
 
     def observe_probe_schedule(
         target: str,
         scheduled_due: float,
-        started_at: float,
+        submitted_at: float,
         interval_seconds: float,
     ) -> None:
         target_index = int(target.rsplit(".", 1)[1])
+        include_in_cadence = target_index < timeout_start_index
         cadence_evidence.scheduled(
             target,
             scheduled_due=scheduled_due,
-            started_at=started_at,
+            started_at=submitted_at,
             interval_seconds=interval_seconds,
-            include_in_cadence=target_index < timeout_start_index,
+            include_in_cadence=include_in_cadence,
+            elapsed_seconds=(submitted_at - soak_started_at if soak_started_at is not None else None),
         )
 
     def ping_factory(timeout_ms: int) -> SimulatedPingRunner:
@@ -470,7 +512,8 @@ def main() -> int:
     # 테스트 중 메모리가 계속 늘면 장시간 사용 시 문제가 될 수 있습니다.
     tracemalloc.start()
     process_started_at = time.process_time()
-    started_at = time.monotonic()
+    soak_started_at = time.monotonic()
+    started_at = soak_started_at
     last_sample_at = started_at
     last_progress_at = started_at
     worker.start()
@@ -874,7 +917,7 @@ def build_summary(
     diagnostics_csv_path: Path,
     health_csv_path: Path,
     stopped_cleanly: bool,
-    cadence_evidence: dict[str, int | float] | None = None,
+    cadence_evidence: dict[str, object] | None = None,
     lifecycle_evidence: dict[str, object] | None = None,
 ) -> dict[str, Any]:
     # raw 샘플을 그대로 읽기 어렵기 때문에, 실패 판단에 필요한 최댓값과 평균값만 요약합니다.

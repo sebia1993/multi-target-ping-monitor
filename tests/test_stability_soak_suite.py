@@ -294,6 +294,16 @@ def test_soak_suite_evidence_report_summarizes_thresholds_and_checks(tmp_path) -
     summary = _summary("release", duration_seconds=5.0, ping_results=200, session_log_rows=205)
     summary["session_log_min_expected_rows"] = 200
     summary["session_log_row_delta"] = 5
+    summary["top_cadence_due_lateness_samples"] = [
+        {
+            "target": "198.51.100.1",
+            "lateness_seconds": 0.05,
+            "scheduled_due_monotonic": 100.0,
+            "submitted_at_monotonic": 100.05,
+            "elapsed_seconds": 1.0,
+            "observed_at_iso": "2026-01-01T01:00:01.000+00:00",
+        }
+    ]
     summary_path.write_text(json.dumps(summary, ensure_ascii=False), encoding="utf-8")
     manifest_path = run_root / "stability_soak_suite.json"
     suite.write_manifest(
@@ -323,6 +333,10 @@ def test_soak_suite_evidence_report_summarizes_thresholds_and_checks(tmp_path) -
     assert profile_report["measurements"]["probe_target_count"] == 50
     assert profile_report["measurements"]["probe_min_starts_per_target"] == 1
     assert profile_report["measurements"]["cadence_max_abs_grid_drift_seconds"] == 0.05
+    assert (
+        profile_report["measurements"]["top_cadence_due_lateness_samples"]
+        == summary["top_cadence_due_lateness_samples"]
+    )
     assert profile_report["measurements"]["max_same_target_overlap"] == 1
     assert profile_report["measurements"]["session_resume_verified"] is True
     assert profile_report["checks"]["evidence_schema_ok"] is True
@@ -642,7 +656,11 @@ def test_manual_stability_soak_blocks_long_profiles_on_github_hosted_windows() -
     text = (ROOT / ".github" / "workflows" / "stability-soak.yml").read_text(encoding="utf-8")
 
     github_hosted_job = text.split("  self_hosted_windows:", maxsplit=1)[0]
+    self_hosted_job = text.split("  self_hosted_windows:", maxsplit=1)[1]
 
+    assert "runs-on: windows-2022" in github_hosted_job
+    assert "\n    runs-on: windows-latest" not in github_hosted_job
+    assert "runs-on: [self-hosted, Windows]" in self_hosted_job
     assert "long8h" in github_hosted_job
     assert "long24h" in github_hosted_job
     assert "runner_mode=self-hosted-windows" in github_hosted_job
