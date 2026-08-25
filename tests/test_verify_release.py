@@ -250,6 +250,8 @@ def test_publish_release_notes_include_traceable_zip_metadata() -> None:
     assert "%LOCALAPPDATA%\\MultiPingCheck\\logs\\multipingcheck.log" in text
     assert "- 기준 커밋: $Head" in text
     assert "source_commit = $Head" in text
+    assert '"--identity", "$Tag@$Head"' in text
+    assert text.index('"scripts\\finalize_cyclonedx_sbom.py"') < text.index("$SbomHash =")
     assert '"--manifest", $ManifestItem.FullName' in text
     assert '"--expected-source-commit", $Head' in text
 
@@ -279,6 +281,7 @@ def test_release_windows_workflow_matches_publish_contract() -> None:
     assert "contents: write" in text
     assert "id-token: write" in text
     assert "attestations: write" in text
+    assert "artifact-metadata: write" in text
     assert "runs-on: windows-latest" in text
     assert "fetch-depth: 0" in text
     assert '$env:GITHUB_REF -ne "refs/heads/main"' in text
@@ -301,7 +304,11 @@ def test_release_windows_workflow_matches_publish_contract() -> None:
     assert ".\\scripts\\publish_release.ps1 -Tag $env:RESOLVED_TAG" in text
     assert "-SkipUpload" in text
     assert "actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2" in text
-    assert "actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0" in text
+    assert "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2" in text
+    assert "actions/attest-sbom@" not in text
+    sbom_step = text.split("- name: Attest runtime SBOM", maxsplit=1)[1].split("- name:", maxsplit=1)[0]
+    assert "subject-path: ${{ steps.metadata.outputs.zip_path }}" in sbom_step
+    assert "sbom-path: ${{ steps.metadata.outputs.sbom_path }}" in sbom_step
     assert "git tag -a $env:RESOLVED_TAG" in text
     assert 'git cat-file -t "refs/tags/$env:RESOLVED_TAG"' in text
     assert '"created=false" >> $env:GITHUB_OUTPUT' in text
@@ -352,6 +359,9 @@ def test_ci_workflow_consolidates_quality_and_windows_package_checks() -> None:
     assert "git checkout --detach $env:GITHUB_SHA" in ci
     assert ".\\scripts\\publish_release.ps1 -SkipUpload -SkipBuild" in ci
     assert "cyclonedx-py requirements requirements.lock" in ci
+    assert "python scripts\\finalize_cyclonedx_sbom.py" in ci
+    assert '$version = (python -c "from app import __version__; print(__version__)").Trim()' in ci
+    assert '--identity "v$version@$env:GITHUB_SHA"' in ci
     assert not (root / "windows-fast-check.yml").exists()
     assert not (root / "windows-release-verify.yml").exists()
 
@@ -371,7 +381,7 @@ def test_all_workflow_actions_are_exact_reviewed_node24_pins() -> None:
         "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
         "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
         "actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8",
-        "actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e",
+        "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6",
     }
     assert set(action_refs) == allowed_pins
 

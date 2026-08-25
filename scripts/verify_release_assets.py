@@ -3,8 +3,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 import zipfile
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.finalize_cyclonedx_sbom import deterministic_serial_number, validate_serial_number
 
 
 def sha256(path: Path) -> str:
@@ -64,6 +71,13 @@ def verify(
     component_names = {str(component.get("name", "")).lower() for component in components}
     if sbom.get("bomFormat") != "CycloneDX" or sbom.get("specVersion") != "1.6":
         raise RuntimeError("SBOM is not validated CycloneDX 1.6 JSON")
+    serial_number = validate_serial_number(sbom.get("serialNumber"))
+    expected_serial_number = deterministic_serial_number(
+        sbom,
+        f"v{expected_version}@{expected_source_commit}",
+    )
+    if serial_number != expected_serial_number:
+        raise RuntimeError("SBOM serialNumber does not match the deterministic release identity")
     if not {"pyside6", "openpyxl"}.issubset(component_names):
         raise RuntimeError("SBOM is missing runtime components")
 

@@ -26,6 +26,7 @@
 - PR/main 검증을 `CI` workflow의 Linux quality/security와 Windows package gate로 통합
 - GitHub-hosted Windows에서 실제 14,400초 `long4h` soak를 실행할 수 있도록 증거 schema 강화
 - Release가 실행 대기 중 바뀐 `main`을 따라가지 않도록 dispatch 시점의 정확한 commit SHA로 checkout 고정
+- 재현 가능한 CycloneDX SBOM에 release tag·source commit·dependency content 기반의 결정적 RFC 4122 serial을 추가하고 통합 `actions/attest`로 SBOM attestation 생성
 
 ### 보안
 

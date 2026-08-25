@@ -249,9 +249,19 @@ Invoke-Checked "cyclonedx-py" @(
     "--output-file",
     $SbomPath
 )
+Invoke-Checked "python" @(
+    "scripts\finalize_cyclonedx_sbom.py",
+    "--sbom", $SbomPath,
+    "--identity", "$Tag@$Head"
+)
 $SbomItem = Get-Item -LiteralPath $SbomPath
 $SbomPayload = Get-Content -LiteralPath $SbomItem.FullName -Raw | ConvertFrom-Json
-if ($SbomPayload.bomFormat -ne "CycloneDX" -or $SbomPayload.specVersion -ne "1.6" -or @($SbomPayload.components).Count -lt 1) {
+if (
+    $SbomPayload.bomFormat -ne "CycloneDX" -or
+    $SbomPayload.specVersion -ne "1.6" -or
+    $SbomPayload.serialNumber -notmatch '^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' -or
+    @($SbomPayload.components).Count -lt 1
+) {
     throw "Generated SBOM failed the CycloneDX 1.6 validation gate."
 }
 $SbomHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $SbomItem.FullName).Hash.ToLowerInvariant()
