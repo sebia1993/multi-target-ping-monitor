@@ -52,11 +52,13 @@ jobs:
             app/ui/session_open_worker.py \
             app/ui/worker.py \
             scripts/run_stability_soak_suite.py \
+            scripts/finalize_cyclonedx_sbom.py \
             scripts/scan_secrets.py \
             scripts/soak_test.py \
             scripts/verify_release.py \
             scripts/verify_release_assets.py \
             tests/test_security_check.py \
+            tests/test_finalize_cyclonedx_sbom.py \
             tests/test_soak_test.py \
             tests/test_stability_soak_suite.py \
             tests/test_verify_release.py \
@@ -67,11 +69,13 @@ jobs:
             app/ui/session_open_worker.py \
             app/ui/worker.py \
             scripts/run_stability_soak_suite.py \
+            scripts/finalize_cyclonedx_sbom.py \
             scripts/scan_secrets.py \
             scripts/soak_test.py \
             scripts/verify_release.py \
             scripts/verify_release_assets.py \
             tests/test_security_check.py \
+            tests/test_finalize_cyclonedx_sbom.py \
             tests/test_soak_test.py \
             tests/test_stability_soak_suite.py \
             tests/test_verify_release.py \
@@ -144,8 +148,16 @@ jobs:
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
           cyclonedx-py requirements requirements.lock --output-reproducible --output-format JSON --output-file artifacts\multipingcheck-sbom.cdx.json
           if ($LASTEXITCODE -ne 0) { throw "SBOM generation failed" }
+          $version = (python -c "from app import __version__; print(__version__)").Trim()
+          if ($LASTEXITCODE -ne 0 -or -not $version) { throw "version resolution failed" }
+          python scripts\finalize_cyclonedx_sbom.py --sbom artifacts\multipingcheck-sbom.cdx.json --identity "v$version@$env:GITHUB_SHA"
+          if ($LASTEXITCODE -ne 0) { throw "SBOM finalization failed" }
           $sbom = Get-Content artifacts\multipingcheck-sbom.cdx.json -Raw | ConvertFrom-Json
-          if ($sbom.specVersion -ne "1.6" -or @($sbom.components).Count -lt 1) {
+          if (
+            $sbom.specVersion -ne "1.6" -or
+            $sbom.serialNumber -notmatch '^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' -or
+            @($sbom.components).Count -lt 1
+          ) {
             throw "SBOM validation failed"
           }
 

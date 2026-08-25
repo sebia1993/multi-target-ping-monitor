@@ -6,6 +6,7 @@ import zipfile
 
 import pytest
 
+from scripts.finalize_cyclonedx_sbom import finalize
 from scripts.verify_release_assets import verify
 
 SOURCE_COMMIT = "a" * 40
@@ -34,6 +35,7 @@ def _assets(tmp_path, *, version: str = "0.2.0"):
         ),
         encoding="utf-8",
     )
+    finalize(sbom_path, f"v{version}@{SOURCE_COMMIT}")
     sbom_digest = hashlib.sha256(sbom_path.read_bytes()).hexdigest()
     manifest_path = tmp_path / "MultiPingCheck_v0.2.0_release-manifest.json"
     manifest_path.write_text(
@@ -94,4 +96,22 @@ def test_release_assets_fail_closed_on_manifest_mismatch(tmp_path) -> None:
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="manifest source commit"):
+        verify(zip_path, checksum_path, sbom_path, manifest_path, "0.2.0", SOURCE_COMMIT)
+
+
+def test_release_assets_fail_closed_when_sbom_serial_number_is_missing(tmp_path) -> None:
+    zip_path, checksum_path, sbom_path, manifest_path = _assets(tmp_path)
+    sbom = json.loads(sbom_path.read_text(encoding="utf-8"))
+    sbom.pop("serialNumber")
+    sbom_path.write_text(json.dumps(sbom), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="serialNumber"):
+        verify(zip_path, checksum_path, sbom_path, manifest_path, "0.2.0", SOURCE_COMMIT)
+
+
+def test_release_assets_fail_closed_when_sbom_serial_number_has_other_identity(tmp_path) -> None:
+    zip_path, checksum_path, sbom_path, manifest_path = _assets(tmp_path)
+    finalize(sbom_path, f"v0.2.0@{'b' * 40}")
+
+    with pytest.raises(RuntimeError, match="deterministic release identity"):
         verify(zip_path, checksum_path, sbom_path, manifest_path, "0.2.0", SOURCE_COMMIT)

@@ -46,7 +46,7 @@ workflow는 다음 asset을 생성하고 검증합니다.
 - `MultiPingCheck_v0.2.0_sbom.cdx.json`
 - `MultiPingCheck_v0.2.0_release-manifest.json`
 
-또한 annotated tag, Build provenance, SBOM attestation을 생성합니다. Release 생성이 실패하면 이 실행에서 새로 만든 tag만 정리하며, 기존 tag는 삭제하지 않습니다.
+SBOM은 재현 가능한 dependency content와 release tag·source commit으로부터 결정적인 RFC 4122 `serialNumber`를 생성해 GitHub SBOM attestation 입력 계약을 만족합니다. 또한 annotated tag, Build provenance, SBOM attestation을 생성합니다. Release 생성이 실패하면 이 실행에서 새로 만든 tag만 정리하며, 기존 tag는 삭제하지 않습니다.
 
 ## 4. 독립 다운로드 검증
 
