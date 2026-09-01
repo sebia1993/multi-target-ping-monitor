@@ -4,19 +4,19 @@ description = "Windows desktop multi-target ping monitoring tool."
 requires-python = ">=3.10"
 dynamic = ["version"]
 dependencies = [
-    "PySide6==6.10.3",
+    "PySide6==6.11.2",
     "openpyxl==3.1.5",
 ]
 
 [project.optional-dependencies]
 dev = [
     "cyclonedx-bom==7.3.1",
-    "cyclonedx-python-lib==10.3.0",
-    "lxml==6.1.0",
+    "cyclonedx-python-lib==11.12.0",
+    "lxml==6.1.2",
     "pip-audit==2.10.1",
     "pyinstaller==6.22.2",
-    "pytest==9.0.3",
-    "ruff==0.16.4",
+    "pytest==9.1.1",
+    "ruff==0.16.5",
 ]
 
 [build-system]
