@@ -32,7 +32,7 @@
 저장소 루트의 Windows PowerShell에서 Python 3.12를 사용합니다. 의존성 다운로드 이후 아래 테스트와 soak는 합성 데이터로 동작합니다. `--live`와 `--target`은 이 재현에 사용하지 않습니다.
 
 ```powershell
-python -m venv .venv
+py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --require-hashes -r requirements-dev.lock
 $env:QT_QPA_PLATFORM = "offscreen"
 .\.venv\Scripts\python.exe -m pytest -q tests/test_metrics_analyzer.py tests/test_worker.py tests/test_session_observation_loader.py tests/test_validators_storage.py
@@ -48,7 +48,7 @@ $env:QT_QPA_PLATFORM = "offscreen"
 - `session_log_rows`와 `session_log_segments`에 저장 증거가 있는지
 - cadence, pending ping, queue, thread 지표가 검사 기준을 충족하는지
 
-이 결과는 짧은 simulated workload의 증거입니다. 4/8/24시간 실행이나 Windows EXE 실행 증거로 대신할 수 없습니다. 전체 source verifier는 `python scripts/verify_release.py`, Windows EXE 검증은 [개발 절차](../README.md#검증-명령)를 따릅니다.
+이 결과는 짧은 simulated workload의 증거입니다. 4/8/24시간 실행이나 Windows EXE 실행 증거로 대신할 수 없습니다. 전체 source verifier는 `.\.venv\Scripts\python.exe scripts/verify_release.py`, Windows EXE 검증은 [개발 절차](../README.md#검증-명령)를 따릅니다.
 
 ## 검토자가 확인할 증거
 
