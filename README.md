@@ -135,7 +135,7 @@ segmented CSV 지속 저장
 
 ![MultiPingCheck 다중 대상 측정 화면](docs/images/multiping-main.png)
 
-화면에서는 대상별로 현재 상태, 손실률, 샘플 수와 독립적인 실시간 지연 그래프를 함께 확인할 수 있습니다.
+화면에서는 대상별로 현재 상태, 손실률, 샘플 수와 독립적인 실시간 지연 그래프를 함께 확인할 수 있습니다. [시작 화면·읽을 값·개발 재연 부록](docs/USAGE_SCREENSHOTS_KO.md)에서 현재 조작 동선과 캡처 출처를 확인하세요.
 
 ## 시간 범위와 장시간 세션
 
@@ -156,6 +156,8 @@ segmented CSV 지속 저장
 
 ## 세션 저장과 복구
 
+아래는 저장 엔진 및 복구 구현입니다. 세션 재열기·보관 관리 컨트롤은 현재 일반 UI에서 숨겨져 있습니다. [개발 재연과 사용 화면의 경계](docs/USAGE_SCREENSHOTS_KO.md)를 확인하세요.
+
 기본 측정 데이터:
 
 ```text
@@ -168,7 +170,7 @@ segmented CSV 지속 저장
 %LOCALAPPDATA%\MultiPingCheck\logs\multipingcheck.log
 ```
 
-사용자 내보내기 기본 위치:
+내보내기 내부 구현의 기본 위치(현재 일반 UI 진입점 없음):
 
 ```text
 %USERPROFILE%\Documents\MultiPingCheck
@@ -273,7 +275,7 @@ UI 10/20/50대 프로필은 기본적으로 event gap과 event 처리 시간이 
 - 자동 테스트는 실제 사내 장비·고객망 의존성을 요구하지 않습니다.
 - 저장소에 실제 IP 목록, Hostname, 사용자명, 고객/사이트명, 실제 로그를 커밋하지 않습니다.
 - 외부 공유용 화면과 진단자료는 식별자를 먼저 비식별화합니다.
-- 이메일/REST/외부 실행 Alert action은 사용자가 명시적으로 구성해야 하는 고급 기능입니다.
+- 이메일/REST/외부 실행 Alert action은 내부 구현에 남아 있으나 현재 일반 UI에서는 숨겨져 있습니다. 개발 호출에서도 외부 전송은 명시적으로 구성해야 합니다.
 - 비밀번호와 Token을 소스·로그·문서에 직접 기록하지 않습니다.
 
 공개 저장소 기준은 [보안 정책](.github/SECURITY.md), 실제 네트워크 검증 기준은 [현장 검증](docs/field_verification.md)을 참고하십시오.
@@ -345,4 +347,3 @@ EXE/ZIP/checksum은 소스 저장소에 커밋하지 않고 Release asset으로 
 | [프로젝트 상태](docs/PROJECT_STATUS.md) | 현재 범위와 향후 개선 방향 |
 | [개발자 모드](docs/DEVELOPER_MODE.md) | 로컬 UI 개발 보조 기능 |
 
-화면별 조작과 읽을 값은 [현재 사용 화면 안내](docs/USAGE_SCREENSHOTS_KO.md)를 참고하세요.

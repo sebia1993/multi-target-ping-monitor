@@ -60,4 +60,4 @@ $env:QT_QPA_PLATFORM = "offscreen"
 
 IPv4 50개까지의 Windows 관측 도구이며 ICMP가 차단된 환경의 서비스 가용성을 단독 판정할 수 없습니다. RTT 변동을 UDP/RTP 서비스 품질로 환산하지 않습니다. 로컬 macOS의 합성 테스트가 통과해도 Windows Ping/Tracert, EXE, EDR와 NIC/VPN 드라이버 호환성은 별도입니다.
 
-다음 검증은 허가된 환경에서 baseline과 서비스 증상을 대조하고, 시간 범위 전환·세션 재열기·종료를 관찰하는 것입니다. 공개할 때는 운영 식별자를 제거하고 [현장 검증 항목](field_verification.md)의 실제 수행 범위만 기록합니다.
+다음 검증은 허가된 환경에서 baseline과 서비스 증상을 대조하고, 현재 UI의 시간 범위 전환·종료를 관찰하는 것입니다. 세션 재열기·내보내기는 현재 일반 UI에서 숨겨져 있어 별도의 개발 호출로만 재연하며, [화면 안내](USAGE_SCREENSHOTS_KO.md)에 그 경계를 기록했습니다. 공개할 때는 운영 식별자를 제거하고 [현장 검증 항목](field_verification.md)의 실제 수행 범위만 기록합니다.

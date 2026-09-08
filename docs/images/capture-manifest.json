@@ -1,0 +1,31 @@
+{
+  "source_sha": "f0e772454b0c8dc5a0d1229a663a2dbb128bc1d8",
+  "product_version": "0.2.0",
+  "tool": "scripts/render_docs_screenshots.py",
+  "os": "Windows-2025Server-10.0.26100-SP0",
+  "synthetic": true,
+  "device_connections": false,
+  "limitations": "Session/export replay invokes internal application methods; these controls are hidden in the current simplified UI.",
+  "artifacts": [
+    {
+      "file": "multiping-start.png",
+      "sha256": "6a282c533516f7132a078a73f0af4ee2753a9643a463e0c2cc75ad424a7a1e7e"
+    },
+    {
+      "file": "multiping-main.png",
+      "sha256": "e66dbd5e1da19ab3527137cf1b55a695d23eb3b9854d5de1e3699faf989a499d"
+    },
+    {
+      "file": "multiping-session-replay.png",
+      "sha256": "6a1f13f6ff5a7e19dd316c50ec393eee6371ff6720acf8eb9c5191eeebd6d1b6"
+    },
+    {
+      "file": "multiping-export.png",
+      "sha256": "fe5e3b3d9a32ec97c531d9a70c3781642eb424ac8534037673f4a8af635b17d7"
+    },
+    {
+      "file": "session-demo.csv",
+      "sha256": "532ae2b735f9d7ca9f75f3e7ee248278e4b9fdbe249fbea6f20a323c65447d16"
+    }
+  ]
+}
