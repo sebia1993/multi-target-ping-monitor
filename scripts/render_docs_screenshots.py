@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
 
 from PySide6.QtWidgets import QApplication
 
+from app import __version__
 from app.core.models import STATUS_OK, STATUS_TIMEOUT, HopObservation
 from app.ui.latency_graph import TimelineSeries
 from app.ui.main_window import MainWindow
@@ -216,7 +217,7 @@ def main() -> None:
     for path in artifacts:
         if not path.is_file() or path.stat().st_size < 100:
             raise RuntimeError(f"Invalid documentation artifact: {path.name}")
-    manifest = {"source_sha": source_sha, "product_version": "0.2.0", "tool": "scripts/render_docs_screenshots.py",
+    manifest = {"source_sha": source_sha, "product_version": __version__, "tool": "scripts/render_docs_screenshots.py",
         "os": platform.platform(), "synthetic": True, "device_connections": False,
         "limitations": "Session/export replay invokes internal application methods; these controls are hidden in the current simplified UI.",
         "artifacts": [{"file": p.name, "sha256": hashlib.sha256(p.read_bytes()).hexdigest()} for p in artifacts]}
