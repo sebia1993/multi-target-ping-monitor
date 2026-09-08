@@ -62,6 +62,8 @@ def _save(window: MainWindow, path: Path, app: QApplication) -> None:
     for _ in range(20):
         app.processEvents()
         time.sleep(0.01)
+    window.grab()  # Resolve deferred Qt backing-store sizing before the final render.
+    app.processEvents()
     image = window.grab()
     if image.isNull() or image.width() < 1200 or image.height() < 700:
         raise RuntimeError(f"문서 화면 캡처 실패: {path.name}")
