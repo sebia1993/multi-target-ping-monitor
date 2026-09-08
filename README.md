@@ -346,4 +346,3 @@ EXE/ZIP/checksum은 소스 저장소에 커밋하지 않고 Release asset으로 
 | [오류 코드](docs/error_codes.md) | 안정적인 오류 코드와 1차 조치 |
 | [프로젝트 상태](docs/PROJECT_STATUS.md) | 현재 범위와 향후 개선 방향 |
 | [개발자 모드](docs/DEVELOPER_MODE.md) | 로컬 UI 개발 보조 기능 |
-
