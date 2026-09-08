@@ -3,7 +3,7 @@ name: Documentation screenshots
 on:
   workflow_dispatch:
   push:
-    branches: ["codex/usage-evidence-20260908"]
+    branches: ["main", "codex/usage-evidence-20260908"]
     paths:
       - "scripts/render_docs_screenshots.py"
       - "app/**"
