@@ -140,6 +140,7 @@ jobs:
           name: stability-soak-${{ github.run_id }}-${{ inputs.runner_mode }}
           path: artifacts/stability_soak_suite
           if-no-files-found: warn
+          retention-days: 1
 
   self_hosted_windows:
     if: ${{ inputs.runner_mode == 'self-hosted-windows' }}
@@ -240,3 +241,4 @@ jobs:
           name: stability-soak-${{ github.run_id }}-${{ inputs.runner_mode }}
           path: artifacts/stability_soak_suite
           if-no-files-found: warn
+          retention-days: 1

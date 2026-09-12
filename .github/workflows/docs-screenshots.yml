@@ -32,4 +32,4 @@ jobs:
           name: qt-documentation-${{ github.sha }}
           path: artifacts/docs-images/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
