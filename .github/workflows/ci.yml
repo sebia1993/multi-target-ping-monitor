@@ -169,6 +169,7 @@ jobs:
             dist/MultiPingCheck/**
             artifacts/multipingcheck-sbom.cdx.json
           if-no-files-found: error
+          retention-days: 1
 
       - name: Upload package diagnostics on failure
         if: failure()
@@ -181,3 +182,4 @@ jobs:
             artifacts/**
             release/**
           if-no-files-found: ignore
+          retention-days: 1
