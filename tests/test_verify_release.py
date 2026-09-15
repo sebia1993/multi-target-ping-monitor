@@ -92,6 +92,8 @@ def test_application_version_has_one_executable_source() -> None:
 
     assert app_init.count(f'__version__ = "{__version__}"') == 1
     assert len(re.findall(r"^__version__\s*=", app_init, flags=re.MULTILINE)) == 1
+    # A dependency such as 10.3.0 is not a duplicate of application version 0.3.0.
+    version_literal = re.compile(rf"(?<![\d.]){re.escape(__version__)}(?![\d.])")
     for path in [
         root / "pyproject.toml",
         root / "build_windows_exe.ps1",
@@ -99,7 +101,7 @@ def test_application_version_has_one_executable_source() -> None:
         *sorted((root / ".github" / "workflows").glob("*.yml")),
     ]:
         if path.is_file():
-            assert __version__ not in path.read_text(encoding="utf-8-sig"), path
+            assert version_literal.search(path.read_text(encoding="utf-8-sig")) is None, path
 
 
 def test_direct_development_pins_match_input_lock_and_pyproject() -> None:
