@@ -171,14 +171,16 @@ def build_report(
     start, end = start.replace(microsecond=0), end.replace(microsecond=0)
     if end < start:
         raise ValueError("종료 시각은 시작 시각 이후여야 합니다.")
-    duration = max((end - start).total_seconds(), 1.0)
+    duration = max(int((end - start).total_seconds()), 1)
     bucket_count = min(GRAPH_BUCKETS, max(2, int(duration) + 1))
     reports = {target.address: TargetReport(target, buckets=[Bucket() for _ in range(bucket_count)]) for target in request.targets}
     for point in merged_observations(request, disk, check_cancel):
         if not start <= point.timestamp <= end:
             continue
         report = reports[point.address]
-        index = min(int((point.timestamp - start).total_seconds() / duration * (bucket_count - 1)), bucket_count - 1)
+        # Multiply integer seconds before division to avoid false gaps from float rounding.
+        elapsed = int((point.timestamp - start).total_seconds())
+        index = min(elapsed * (bucket_count - 1) // duration, bucket_count - 1)
         report.buckets[index].add(point)
         report.stats.add(point)
         if point.status in NON_PROBES:
