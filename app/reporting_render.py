@@ -168,7 +168,7 @@ def write_monitoring_pdf(path: Path, report: MonitoringReport, *, cancelled: Cal
             painter.setPen(QColor(color))
             value = str(value)
             if elide:
-                value = QFontMetricsF(font).elidedText(value, Qt.ElideRight, w)
+                value = QFontMetricsF(font, writer).elidedText(value, Qt.ElideRight, w)
             painter.drawText(QRectF(x, y, w, h), Qt.AlignLeft | Qt.AlignVCenter | Qt.TextWordWrap, value)
 
         def footer():
@@ -253,7 +253,7 @@ def write_monitoring_pdf(path: Path, report: MonitoringReport, *, cancelled: Cal
                 text(0, 412, width, 20, f"제외한 중지·미측정 표본 {row.ignored_samples}개 | 측정 오류(ERROR) {row.error_samples}개", 8)
                 if row.failure_details:
                     recent = " / ".join(f"{when:%H:%M:%S} {status}" for when, status in row.failure_details[-3:])
-                    text(0, 436, width, 28, f"최근 실패 표본: {recent}", 8)
+                    text(0, 436, width, 28, f"최근 실패 표본 (최대 3개): {recent}", 8)
             new_page()
             heading("집계·해석 기준")
             y = 90.0
@@ -263,8 +263,11 @@ def write_monitoring_pdf(path: Path, report: MonitoringReport, *, cancelled: Cal
             footer()
         finally:
             painter.end()
-            del writer
+            # Release the writer before atomic rename without deleting a closure variable.
+            writer = None
         _check_cancel(cancelled)
-        if temp.stat().st_size < 256 or temp.read_bytes()[:5] != b"%PDF-":
+        with temp.open("rb") as handle:
+            header = handle.read(5)
+        if temp.stat().st_size < 256 or header != b"%PDF-":
             raise OSError("PDF 파일 생성 검증에 실패했습니다.")
     atomic_write_path(path, save)
