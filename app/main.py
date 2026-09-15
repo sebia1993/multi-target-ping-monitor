@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from app.ui.main_window import MainWindow
+from app.ui.report_window import ReportMainWindow as MainWindow
 from app.utils.instance_lock import (
     APP_ALREADY_RUNNING_CODE,
     InstanceLockError,
@@ -22,6 +22,15 @@ UNEXPECTED_ERROR_CODE = "APP_UNEXPECTED_ERROR"
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("MultiPingCheck")
+    if len(sys.argv) > 1 and sys.argv[1] == "--report-smoke-test":
+        if len(sys.argv) != 3:
+            return 2
+        try:
+            from app.report_smoke import run_report_smoke
+            return run_report_smoke(Path(sys.argv[2]))
+        except Exception:
+            logging.getLogger(__name__).exception("Isolated report smoke test failed")
+            return 1
     try:
         instance_lock = acquire_instance_lock()
     except InstanceLockError as exc:
