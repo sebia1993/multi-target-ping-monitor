@@ -10,6 +10,7 @@ from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
 import scripts.verify_release as verify_release
+from app import __version__
 from app.core.models import STATUS_ERROR, STATUS_OK, HopInfo, MetricSnapshot, PingResult
 
 
@@ -88,7 +89,8 @@ def test_application_version_has_one_executable_source() -> None:
     root = Path(__file__).resolve().parents[1]
     app_init = (root / "app" / "__init__.py").read_text(encoding="utf-8")
 
-    assert app_init.count('__version__ = "0.2.0"') == 1
+    assert re.fullmatch(r"\d+\.\d+\.\d+", __version__)
+    assert re.findall(r'^__version__\s*=\s*"([^"]+)"', app_init, re.MULTILINE) == [__version__]
     for path in [
         root / "pyproject.toml",
         root / "build_windows_exe.ps1",
@@ -96,7 +98,7 @@ def test_application_version_has_one_executable_source() -> None:
         *sorted((root / ".github" / "workflows").glob("*.yml")),
     ]:
         if path.is_file():
-            assert "0.2.0" not in path.read_text(encoding="utf-8-sig"), path
+            assert __version__ not in path.read_text(encoding="utf-8-sig"), path
 
 
 def test_direct_development_pins_match_input_lock_and_pyproject() -> None:

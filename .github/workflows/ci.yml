@@ -126,6 +126,14 @@ jobs:
         shell: pwsh
         run: python scripts\verify_release.py
 
+      - name: Exercise single and 50-target report output from source
+        shell: pwsh
+        run: |
+          python -m app.report_smoke artifacts/report-source
+          if ($LASTEXITCODE -ne 0) { throw "source report smoke failed" }
+          git archive --format=zip HEAD -o artifacts/report-source/source.zip
+          if ($LASTEXITCODE -ne 0) { throw "source evidence archive failed" }
+
       - name: Build Windows EXE
         shell: pwsh
         run: .\build_windows_exe.ps1
@@ -133,6 +141,17 @@ jobs:
       - name: Verify packaged EXE
         shell: pwsh
         run: python scripts\verify_release.py --exe
+
+      - name: Exercise PDF and HTML generation inside the packaged EXE
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = "windows"
+          $exe = (Resolve-Path dist/MultiPingCheck/MultiPingCheck.exe).Path
+          $output = Join-Path $env:RUNNER_TEMP "multiping-report-packaged"
+          $process = Start-Process -FilePath $exe -ArgumentList @("--report-smoke-test", $output) -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "packaged report smoke failed: $($process.ExitCode)" }
+          if (-not (Test-Path "$output/report_validation.json")) { throw "missing packaged report evidence" }
+          Copy-Item -Recurse $output artifacts/report-packaged
 
       - name: Verify detached release packaging
         shell: pwsh
@@ -169,6 +188,19 @@ jobs:
           path: |
             dist/MultiPingCheck/**
             artifacts/multipingcheck-sbom.cdx.json
+          if-no-files-found: error
+          retention-days: 1
+
+      # One explicitly requested report-feature preview. Ordinary CI stays artifact-free.
+      - name: Upload requested report preview and synthetic evidence
+        if: github.head_ref == 'feature/ip-html-pdf-export'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: MultiPingCheck-report-preview-${{ github.run_id }}
+          path: |
+            release/**
+            artifacts/report-source/**
+            artifacts/report-packaged/**
           if-no-files-found: error
           retention-days: 1
 
