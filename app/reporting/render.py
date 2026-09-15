@@ -162,7 +162,7 @@ def write_pdf(path: Path, report: MonitoringReport, check_cancel: Callable[[], N
         writer.setCreator("MultiPingCheck - offline monitoring report")
         painter = QPainter()
         if not painter.begin(writer):
-            del writer
+            writer = None
             device.close()
             raise OSError("PDF 작성기를 시작할 수 없습니다.")
         page = 1
@@ -240,7 +240,7 @@ def write_pdf(path: Path, report: MonitoringReport, check_cancel: Callable[[], N
             check_cancel()
         finally:
             painter.end()
-            del writer
+            writer = None
             flushed = device.flush()
             error = device.errorString()
             device.close()
