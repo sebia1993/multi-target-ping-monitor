@@ -134,6 +134,34 @@ jobs:
         shell: pwsh
         run: python scripts\verify_release.py --exe
 
+      - name: Verify packaged HTML and PDF report exports
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: windows
+        run: |
+          $output = Join-Path $PWD "artifacts\report-export"
+          $exe = Join-Path $PWD "dist\MultiPingCheck\MultiPingCheck.exe"
+          $process = Start-Process -FilePath $exe -ArgumentList @("--report-smoke-dir", "`"$output`"") -PassThru
+          if (-not $process.WaitForExit(120000)) {
+            $process.Kill()
+            throw "packaged report smoke timed out"
+          }
+          if ($process.ExitCode -ne 0) {
+            Get-Content (Join-Path $output "report-smoke-error.txt") -ErrorAction SilentlyContinue
+            throw "packaged report smoke failed: $($process.ExitCode)"
+          }
+          $manifest = Get-Content (Join-Path $output "report-smoke-manifest.json") -Raw | ConvertFrom-Json
+          if (-not $manifest.packaged -or -not $manifest.synthetic_only -or $manifest.network_probes_sent -ne 0) {
+            throw "report smoke did not run the packaged synthetic path"
+          }
+          foreach ($entry in $manifest.files.PSObject.Properties) {
+            $file = Join-Path $output $entry.Name
+            $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($hash -ne $entry.Value.sha256) { throw "report output digest mismatch" }
+          }
+          git archive --format=zip --output=artifacts/report-source.zip HEAD
+          if ($LASTEXITCODE -ne 0) { throw "report source snapshot failed" }
+
       - name: Verify detached release packaging
         shell: pwsh
         run: |
@@ -162,13 +190,15 @@ jobs:
           }
 
       - name: Upload verified Windows package
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' || github.head_ref == 'feature/monitoring-report-export'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: MultiPingCheck-windows-${{ github.run_id }}
           path: |
             dist/MultiPingCheck/**
             artifacts/multipingcheck-sbom.cdx.json
+            artifacts/report-export/**
+            artifacts/report-source.zip
           if-no-files-found: error
           retention-days: 1
 

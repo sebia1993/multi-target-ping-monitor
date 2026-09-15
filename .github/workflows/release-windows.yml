@@ -1,6 +1,10 @@
 name: Release Windows ZIP
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/release-request.json"
   workflow_dispatch:
     inputs:
       tag:
@@ -85,12 +89,25 @@ jobs:
         run: |
           $version = (python -c "from app import __version__; print(__version__)").Trim()
           $expectedTag = "v$version"
-          $requestedTag = $env:RELEASE_TAG.Trim()
+          $requestedTag = ([string]$env:RELEASE_TAG).Trim()
+          $releaseTitle = ([string]$env:REQUESTED_TITLE).Trim()
+          if ($env:GITHUB_EVENT_NAME -eq "push") {
+            $request = Get-Content -LiteralPath ".github/release-request.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($request.schema_version -ne 1 -or $request.publish -ne $true -or $request.tag -ne $expectedTag) {
+              throw "Invalid explicit release request or tag/version mismatch"
+            }
+            $requestedTag = [string]$request.tag
+            $releaseTitle = [string]$request.title
+          }
           if ($requestedTag -and $requestedTag -ne $expectedTag) { throw "tag/version mismatch" }
-          $releaseTitle = $env:REQUESTED_TITLE.Trim()
           if (-not $releaseTitle) { $releaseTitle = "MultiPingCheck $expectedTag" }
           if ($releaseTitle -match "[`r`n]") { throw "release title must be one line" }
           $safeTag = $expectedTag -replace '[^A-Za-z0-9._-]', '_'
+          $sourceNotes = "docs/releases/$safeTag.md"
+          if ($env:GITHUB_EVENT_NAME -eq "push" -and -not (Test-Path -LiteralPath $sourceNotes -PathType Leaf)) {
+            throw "Explicit release request requires versioned release notes"
+          }
+          "notes_path=$sourceNotes" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
           "tag=$expectedTag" >> $env:GITHUB_OUTPUT
           "title=$releaseTitle" >> $env:GITHUB_OUTPUT
@@ -107,6 +124,35 @@ jobs:
         run: |
           .\scripts\publish_release.ps1 -Tag $env:RESOLVED_TAG -Title $env:RELEASE_TITLE -SkipUpload
           if ($LASTEXITCODE -ne 0) { throw "release preparation failed" }
+
+      - name: Verify report exports from the release ZIP
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: windows
+          ZIP_PATH: ${{ steps.metadata.outputs.zip_path }}
+          EXPECTED_VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $package = Join-Path $env:RUNNER_TEMP "multiping-release-zip-check"
+          Expand-Archive -LiteralPath $env:ZIP_PATH -DestinationPath $package -Force
+          $output = Join-Path $PWD "artifacts/report-export"
+          $exe = Join-Path $package "MultiPingCheck.exe"
+          $process = Start-Process -FilePath $exe -ArgumentList @("--report-smoke-dir", "`"$output`"") -PassThru
+          if (-not $process.WaitForExit(120000)) {
+            $process.Kill()
+            throw "Release ZIP report smoke timed out"
+          }
+          if ($process.ExitCode -ne 0) { throw "Release ZIP report smoke failed: $($process.ExitCode)" }
+          $manifest = Get-Content (Join-Path $output "report-smoke-manifest.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+          if (-not $manifest.packaged -or -not $manifest.synthetic_only -or $manifest.network_probes_sent -ne 0 -or $manifest.version -ne $env:EXPECTED_VERSION) {
+            throw "Release ZIP report smoke metadata mismatch"
+          }
+          foreach ($name in @("sample-all.html", "sample-all.pdf", "sample-one.html", "sample-one.pdf")) {
+            $entry = $manifest.files.PSObject.Properties[$name]
+            if ($null -eq $entry) { throw "Missing report output: $name" }
+            $hash = (Get-FileHash (Join-Path $output $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($hash -ne $entry.Value.sha256) { throw "Report output digest mismatch: $name" }
+          }
 
       - name: Attest ZIP build provenance
         id: provenance
@@ -162,6 +208,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TITLE: ${{ steps.metadata.outputs.title }}
           RELEASE_NOTES: ${{ inputs.notes }}
+          SOURCE_NOTES_PATH: ${{ steps.metadata.outputs.notes_path }}
           RESOLVED_TAG: ${{ steps.metadata.outputs.tag }}
           ZIP_PATH: ${{ steps.metadata.outputs.zip_path }}
           CHECKSUM_PATH: ${{ steps.metadata.outputs.checksum_path }}
@@ -173,6 +220,9 @@ jobs:
           $ErrorActionPreference = "Stop"
           "attempted=false" >> $env:GITHUB_OUTPUT
           $notesPath = Join-Path $env:RUNNER_TEMP "multiping-release-notes.md"
+          if ([string]::IsNullOrWhiteSpace($env:RELEASE_NOTES) -and (Test-Path -LiteralPath $env:SOURCE_NOTES_PATH -PathType Leaf)) {
+            $env:RELEASE_NOTES = Get-Content -LiteralPath $env:SOURCE_NOTES_PATH -Raw -Encoding UTF8
+          }
           @"
           $env:RELEASE_NOTES
 
@@ -229,5 +279,8 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: MultiPingCheck-${{ steps.metadata.outputs.tag }}-release-evidence-${{ github.run_id }}
-          path: release/**
+          path: |
+            release/**
+            artifacts/report-export/**
           if-no-files-found: warn
+          retention-days: 1
