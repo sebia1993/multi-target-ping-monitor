@@ -117,7 +117,11 @@ def merged_observations(
     disk: Iterable[HopObservation],
     check_cancel: Callable[[], None],
 ) -> Iterator[HopObservation]:
-    """Reconcile duplicates only across CSV/live, retaining legitimate repeats.
+    """Use hop-0 TargetMetricTracker samples and reconcile CSV/live copies.
+
+    Full-route mode also records the same probe as a final-hop observation.
+    That representation must not be counted again, even when is_target is True.
+    Repeats within the canonical stream remain legitimate separate probes.
 
     During measurement the current incomplete second comes only from the frozen
     live tail: a later CSV flush cannot add post-click samples in that second.
@@ -125,7 +129,7 @@ def merged_observations(
     addresses = {target.address for target in request.targets}
     tail = tuple(
         _canonical(point) for point in request.live
-        if point.address in addresses and (point.hop_index == 0 or point.is_target)
+        if point.address in addresses and point.hop_index == 0
         and point.timestamp <= request.captured_at
     )
     remaining = Counter(tail)
@@ -133,7 +137,7 @@ def merged_observations(
     for index, point in enumerate(disk):
         if index % 256 == 0:
             check_cancel()
-        if point.address not in addresses or not (point.hop_index == 0 or point.is_target):
+        if point.address not in addresses or point.hop_index != 0:
             continue
         if request.running and point.timestamp >= current_second:
             continue
