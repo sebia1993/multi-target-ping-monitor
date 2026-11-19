@@ -77,3 +77,46 @@ def _validated_state(payload: object) -> FavoriteState:
         if alias.strip():
             result_aliases[raw_address] = alias.strip()
     return FavoriteState(groups=result_groups, aliases=result_aliases)
+
+
+def renamed_group(state: FavoriteState, old_name: str, new_name: str) -> FavoriteState:
+    """Return a new state. The caller only adopts it after atomic persistence."""
+    new_name = new_name.strip()
+    if old_name not in state.groups:
+        raise ValueError("변경할 그룹을 찾지 못했습니다.")
+    if not new_name or len(new_name) > 64:
+        raise ValueError("그룹 이름은 1~64자로 지정하세요.")
+    if new_name != old_name and new_name in state.groups:
+        raise ValueError("이미 같은 이름의 그룹이 있습니다.")
+    groups = {new_name if name == old_name else name: list(addresses)
+              for name, addresses in state.groups.items()}
+    return FavoriteState(groups=groups, aliases=dict(state.aliases))
+
+
+def updated_membership(
+    state: FavoriteState, address: str, group: str, operation: str
+) -> FavoriteState:
+    """Add, remove or move an IPv4 across named groups without side effects.
+
+    A move removes the address from all old groups before adding the chosen one.
+    An add preserves any previous multi-group memberships.
+    """
+    if not validate_target(address)[0]:
+        raise ValueError("유효한 IPv4 주소가 아닙니다.")
+    if group not in state.groups:
+        raise ValueError("그룹을 찾지 못했습니다.")
+    if operation not in {"add", "remove", "move"}:
+        raise ValueError("지원하지 않는 그룹 작업입니다.")
+    groups = {name: list(addresses) for name, addresses in state.groups.items()}
+    if operation == "move":
+        for addresses in groups.values():
+            if address in addresses:
+                addresses.remove(address)
+    elif operation == "remove":
+        if address in groups[group]:
+            groups[group].remove(address)
+    if operation in {"add", "move"} and address not in groups[group]:
+        if len(groups[group]) >= MAX_GROUP_TARGETS:
+            raise ValueError("한 그룹에는 최대 50개 IP만 저장할 수 있습니다.")
+        groups[group].append(address)
+    return FavoriteState(groups=groups, aliases=dict(state.aliases))
