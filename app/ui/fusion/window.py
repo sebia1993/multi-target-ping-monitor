@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime, timezone
 from itertools import islice
+import time
 
 from PySide6.QtWidgets import (
     QComboBox,
@@ -43,6 +44,7 @@ class FusionMainWindow(ReportMainWindow):
             self.status_label.setText(f"즐겨찾기 읽기 실패, 쓰기 잠금: {exc}")
         self.target_aliases.update(self.favorites.aliases)
         self._fusion_last_states: dict[str, str] = {}
+        self._fusion_outage_started_at: dict[str, float] = {}
         self._fusion_mode = "fusion"
         self.fusion_dashboard = FusionDashboard(self)
         container = self.graph_panel.parentWidget()
@@ -75,10 +77,8 @@ class FusionMainWindow(ReportMainWindow):
 
         self._fusion_event_path = app_data_directory() / "fusion_status_events.sqlite3"
         try:
-            for record in reversed(recent_changes(self._fusion_event_path)):
-                self.fusion_dashboard.add_event(
-                    format_local_time(record.observed_at), record.address, record.alias, record.description
-                )
+            for record in reversed(recent_changes(self._fusion_event_path, limit=500)):
+                self.fusion_dashboard.add_event(record)
         except (OSError, ValueError) as exc:
             self.status_label.setText(f"기존 상태 이력 읽기 실패: {exc}")
         self._fusion_writer = StatusEventWriter(self._fusion_event_path, self)
@@ -114,6 +114,7 @@ class FusionMainWindow(ReportMainWindow):
 
     def start_measurement(self) -> None:
         self._fusion_last_states = {}
+        self._fusion_outage_started_at = {}
         super().start_measurement()
         self._sync_fusion_targets()
 
@@ -140,9 +141,20 @@ class FusionMainWindow(ReportMainWindow):
             models.append(model)
             if emit_events and self._is_worker_running():
                 previous = self._fusion_last_states.get(address)
+                now = time.monotonic()
+                paused = self._is_target_paused(address, snapshot)
+                if model.state == "critical" and previous != "critical" and not paused:
+                    self._fusion_outage_started_at[address] = now
                 description = transition_event(
-                    previous, model.state, manually_paused=self._is_target_paused(address, snapshot)
+                    previous, model.state, manually_paused=paused
                 )
+                duration_seconds: int | None = None
+                if previous == "critical" and model.state != "critical":
+                    start_time = self._fusion_outage_started_at.pop(address, None)
+                    if description in {"응답 복구", "장애 완화"} and start_time is not None:
+                        duration_seconds = max(0, int(round(now - start_time)))
+                if paused or model.state == "waiting":
+                    self._fusion_outage_started_at.pop(address, None)
                 if description and getattr(self, "_fusion_writer", None) is not None:
                     event = StatusChange(
                         observed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -151,6 +163,7 @@ class FusionMainWindow(ReportMainWindow):
                         previous=previous or "",
                         current=model.state,
                         description=description,
+                        duration_seconds=duration_seconds,
                     )
                     self._fusion_writer.submit(event)
                 self._fusion_last_states[address] = model.state
@@ -158,14 +171,13 @@ class FusionMainWindow(ReportMainWindow):
         for address in list(self._fusion_last_states):
             if address not in live:
                 self._fusion_last_states.pop(address, None)
+                self._fusion_outage_started_at.pop(address, None)
         dashboard.set_running(self._is_worker_running())
         dashboard.set_targets(models)
 
     def _on_fusion_event_persisted(self, record: StatusChange) -> None:
         if getattr(self, "fusion_dashboard", None) is not None:
-            self.fusion_dashboard.add_event(
-                format_local_time(record.observed_at), record.address, record.alias, record.description
-            )
+            self.fusion_dashboard.add_event(record)
 
     def _on_fusion_event_failed(self, message: str) -> None:
         self.status_label.setText(message)
