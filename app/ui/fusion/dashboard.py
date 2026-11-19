@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QPointF, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QBrush, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QFrame,
     QGridLayout,
@@ -265,7 +266,7 @@ class FusionDashboard(QWidget):
         self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(["이름", "IPv4", "상태", "현재 RTT", "평균 RTT", "손실 %", "표본"])
         self.table.verticalHeader().setVisible(False)
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.cellDoubleClicked.connect(self._open_table_row)
         self.stack.addWidget(self.grid_scroll)
         self.stack.addWidget(self.table)
@@ -455,8 +456,8 @@ class FusionDashboard(QWidget):
                 if item.text() != value:
                     item.setText(value)
                 item.setData(Qt.ItemDataRole.UserRole, target.address)
-                item.setForeground(QColor(TONE[target.state]) if col == 2 else QColor(
-                    "#edf5ff" if self.theme == "dark" else "#1e293b"))
+                item.setForeground(QBrush(QColor(TONE[target.state] if col == 2 else (
+                    "#edf5ff" if self.theme == "dark" else "#1e293b"))))
         self.table.blockSignals(False)
 
     def _open_table_row(self, row: int, _column: int) -> None:
