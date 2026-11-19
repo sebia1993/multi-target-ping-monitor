@@ -165,6 +165,7 @@ class FusionDashboard(QWidget):
     group_requested = Signal(str)
     new_group_requested = Signal()
     remove_group_requested = Signal(str)
+    rename_group_requested = Signal(str)
     load_group_requested = Signal(str)
 
     def __init__(self, parent=None) -> None:
@@ -224,12 +225,15 @@ class FusionDashboard(QWidget):
         self.group_list.currentItemChanged.connect(lambda *_: self._refresh_visible())
         side_layout.addWidget(self.group_list, 1)
         new_group = QPushButton("+ 그룹 생성")
+        rename_group = QPushButton("이름 변경")
         delete_group = QPushButton("그룹 삭제")
         self.load_group_button = QPushButton("입력창에 불러오기")
         new_group.clicked.connect(self.new_group_requested.emit)
+        rename_group.clicked.connect(self._request_group_rename)
         delete_group.clicked.connect(self._request_group_delete)
         self.load_group_button.clicked.connect(self._request_group_load)
         side_layout.addWidget(new_group)
+        side_layout.addWidget(rename_group)
         side_layout.addWidget(delete_group)
         side_layout.addWidget(self.load_group_button)
         workspace.addWidget(sidebar, 0)
@@ -314,6 +318,18 @@ class FusionDashboard(QWidget):
             self.group_list.setCurrentRow(0)
         self.group_list.blockSignals(False)
         self._refresh_visible()
+
+    def select_group(self, name: str) -> None:
+        for index in range(self.group_list.count()):
+            item = self.group_list.item(index)
+            if item.data(Qt.ItemDataRole.UserRole) == name:
+                self.group_list.setCurrentRow(index)
+                return
+
+    def _request_group_rename(self) -> None:
+        name = self._selected_group()
+        if name:
+            self.rename_group_requested.emit(name)
 
     def _request_group_delete(self) -> None:
         name = self._selected_group()
