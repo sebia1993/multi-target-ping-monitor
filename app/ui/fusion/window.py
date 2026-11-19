@@ -364,10 +364,25 @@ class FusionMainWindow(ReportMainWindow):
             ))
         return result
 
-    def closeEvent(self, event) -> None:
+    def _report_visible_range(self, target: str | None = None) -> tuple[datetime, datetime]:
+        """Use live observation time, not an old hidden classic graph's viewport."""
+        if getattr(self, "_fusion_mode", "classic") == "fusion":
+            # Classic chart widgets deliberately do not render in Fusion mode.
+            # Reuse the existing, cached graph-range policy instead of widget geometry.
+            visible = self._main_graph_visible_time_range(self._main_graph_data_bounds())
+            if visible is not None:
+                return visible
+        return super()._report_visible_range(target)
+
+    def _finish_close_event(self, event) -> None:
+        """Drain the event DB only after the existing worker/export threads have ended.
+
+        The classic closeEvent may reject a close while a worker is still stopping.
+        Shutting down our SQLite writer *before* that decision loses later transitions.
+        """
         writer = getattr(self, "_fusion_writer", None)
         if writer is not None and writer.isRunning() and not writer.shutdown():
-            self.status_label.setText("Fusion 이벤트 저장 종료를 완료하지 못했습니다. 다시 종료하세요.")
+            self.status_label.setText("Fusion 이벤트 기록 종료를 완료하지 못했습니다. 다시 종료하세요.")
             event.ignore()
             return
-        super().closeEvent(event)
+        super()._finish_close_event(event)
