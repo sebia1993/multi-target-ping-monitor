@@ -636,7 +636,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--duration-seconds", type=float, default=profile_defaults["duration_seconds"])
     parser.add_argument("--targets", type=int, default=profile_defaults["targets"])
     parser.add_argument(
-        "--ui-implementation", choices=("classic", "fusion"), default="classic",
+        "--ui-implementation",
+        choices=("classic", "fusion"),
+        default="classic",
         help="Which real PySide6 window to exercise with --with-ui. Default preserves legacy profiles.",
     )
     parser.add_argument("--timeout-ratio", type=float, default=profile_defaults["timeout_ratio"])
