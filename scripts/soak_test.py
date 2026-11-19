@@ -434,7 +434,10 @@ def main() -> int:
 
     # with_ui=False면 실제 창 없이 QCoreApplication만 돌립니다.
     # with_ui=True면 offscreen 창까지 연결해 UI 갱신 경로도 같이 확인합니다.
-    app, window = create_application(with_ui=args.with_ui)
+    if args.with_ui and args.ui_implementation == "fusion":
+        # Synthetic runs must never inspect or overwrite the operator's settings.
+        os.environ["MULTIPINGCHECK_DATA_DIR"] = str(args.output_dir / "fusion-sandbox")
+    app, window = create_application(with_ui=args.with_ui, ui_implementation=args.ui_implementation)
     targets = [f"198.51.100.{index}" for index in range(1, args.targets + 1)]
     updates: list[float] = []
     diagnostics_rows: list[dict[str, object]] = []
@@ -632,6 +635,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--duration-seconds", type=float, default=profile_defaults["duration_seconds"])
     parser.add_argument("--targets", type=int, default=profile_defaults["targets"])
+    parser.add_argument(
+        "--ui-implementation", choices=("classic", "fusion"), default="classic",
+        help="Which real PySide6 window to exercise with --with-ui. Default preserves legacy profiles.",
+    )
     parser.add_argument("--timeout-ratio", type=float, default=profile_defaults["timeout_ratio"])
     parser.add_argument("--interval-seconds", type=int, default=profile_defaults["interval_seconds"])
     parser.add_argument("--timeout-delay-seconds", type=float, default=profile_defaults["timeout_delay_seconds"])
@@ -671,6 +678,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.targets < 1:
         parser.error("--targets must be at least 1")
+    if args.ui_implementation == "fusion" and not args.with_ui:
+        parser.error("--ui-implementation fusion requires --with-ui")
     if not 0 <= args.timeout_ratio <= 1:
         parser.error("--timeout-ratio must be between 0 and 1")
     if args.interval_seconds < 0:
@@ -684,14 +693,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def create_application(*, with_ui: bool):
+def create_application(*, with_ui: bool, ui_implementation: str = "classic"):
     # GUI까지 시험할 때도 실제 모니터에 창을 띄우지 않도록 offscreen 플랫폼을 사용합니다.
     # 자동 검증 환경에서 창이 떠서 작업을 방해하지 않게 하기 위함입니다.
     if with_ui:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6.QtWidgets import QApplication
 
-        from app.ui.main_window import MainWindow
+        if ui_implementation == "fusion":
+            from app.ui.fusion.window import FusionMainWindow as MainWindow
+        else:
+            from app.ui.main_window import MainWindow
 
         app = QApplication.instance() or QApplication([])
         window = MainWindow()
@@ -719,6 +731,11 @@ def connect_window(window: object | None, worker: MeasurementWorker) -> None:
     if window is None:
         return
     window.worker = worker
+    if getattr(window, "fusion_dashboard", None) is not None:
+        # Standalone soak bypasses start_measurement(): populate the same target inventory.
+        window.current_targets = list(worker.targets)
+        window.current_target = worker.targets[0] if worker.targets else ""
+        window._sync_fusion_targets()
     worker.trace_completed.connect(window.on_trace_completed)
     worker.route_changed.connect(window.on_route_changed)
     worker.measurement_updated.connect(window.on_measurement_updated)
@@ -951,6 +968,7 @@ def build_summary(
         "timeout_ratio": args.timeout_ratio,
         "duration_seconds": elapsed,
         "with_ui": args.with_ui,
+        "ui_implementation": args.ui_implementation,
         "updates": len(updates),
         "errors": errors,
         "stopped_cleanly": stopped_cleanly,
