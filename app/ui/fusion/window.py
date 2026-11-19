@@ -88,6 +88,16 @@ class FusionMainWindow(ReportMainWindow):
         self._sync_fusion_targets()
         self._sync_graph_panel_visibility()
 
+    def _request_graph_render(self, *, force: bool = False) -> None:
+        """Avoid rendering 50 hidden classic graphs for every Fusion sample."""
+        if getattr(self, "_fusion_mode", "classic") == "fusion" and hasattr(self, "fusion_dashboard"):
+            timer = getattr(self, "_graph_render_timer", None)
+            if timer is not None and timer.isActive():
+                timer.stop()
+            self._pending_graph_render = False
+            return
+        super()._request_graph_render(force=force)
+
     def _fusion_view_mode_changed(self, *_args) -> None:
         self._fusion_mode = str(self.fusion_mode_combo.currentData() or "fusion")
         self._sync_graph_panel_visibility()
