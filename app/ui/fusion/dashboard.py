@@ -1,6 +1,9 @@
 """Native, read-only Fusion dashboard for the existing MultiPingCheck measuring engine."""
 from __future__ import annotations
 
+from collections import deque
+from datetime import datetime, timedelta, timezone
+
 from PySide6.QtCore import QEvent, QPointF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
@@ -22,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.storage.fusion_status_events import StatusChange, format_local_time
 from app.ui.fusion.models import FusionTarget, summarize
 
 TONE = {
@@ -180,6 +184,7 @@ class FusionDashboard(QWidget):
         self._last_columns = 0
         self.theme = "dark"
         self.mode = "cards"
+        self._event_records: deque[StatusChange] = deque(maxlen=500)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 5, 6, 6)
         layout.setSpacing(8)
@@ -278,8 +283,26 @@ class FusionDashboard(QWidget):
         workspace.addWidget(content, 1)
         layout.addLayout(workspace, 1)
         event_row = QHBoxLayout()
-        event_row.addWidget(QLabel("최근 상태 변경"))
+        event_row.addWidget(QLabel("최근 상태 변경 (최대 500건)"))
         event_row.addStretch(1)
+        self.event_search = QLineEdit()
+        self.event_search.setPlaceholderText("시간 / 이름 / IP 검색")
+        self.event_search.setMaximumWidth(220)
+        self.event_search.setClearButtonEnabled(True)
+        self.event_search.textChanged.connect(self._refresh_event_list)
+        event_row.addWidget(self.event_search)
+        self.event_type_filter = QComboBox()
+        for title, value in (("전체 이벤트", ""), ("장애 발생", "critical"),
+                             ("복구 / 완화", "recovery"), ("품질 변동", "quality")):
+            self.event_type_filter.addItem(title, value)
+        self.event_type_filter.currentIndexChanged.connect(self._refresh_event_list)
+        event_row.addWidget(self.event_type_filter)
+        self.event_period_filter = QComboBox()
+        for title, seconds in (("전체 기간", 0), ("최근 1시간", 3600),
+                               ("최근 24시간", 86400), ("최근 7일", 604800)):
+            self.event_period_filter.addItem(title, seconds)
+        self.event_period_filter.currentIndexChanged.connect(self._refresh_event_list)
+        event_row.addWidget(self.event_period_filter)
         self.event_count = QLabel("0건")
         self.event_count.setObjectName("fusionMuted")
         event_row.addWidget(self.event_count)
@@ -481,9 +504,58 @@ class FusionDashboard(QWidget):
         if item is not None:
             self.target_selected.emit(item.text())
 
-    def add_event(self, when: str, address: str, name: str, event: str) -> None:
-        item = QListWidgetItem(f"{when}   {name or address} ({address})   {event}")
-        self.events.insertItem(0, item)
-        while self.events.count() > 200:
-            self.events.takeItem(self.events.count() - 1)
-        self.event_count.setText(f"{self.events.count()}건")
+    @staticmethod
+    def _event_type(record: StatusChange) -> str:
+        if record.description == "장애 발생":
+            return "critical"
+        if record.description in {"응답 복구", "장애 완화"}:
+            return "recovery"
+        return "quality"
+
+    @staticmethod
+    def _duration_text(seconds: int | None) -> str:
+        if seconds is None:
+            return ""
+        seconds = max(0, seconds)
+        minutes, rest = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f" · 지속 {hours}시간 {minutes}분 {rest}초"
+        if minutes:
+            return f" · 지속 {minutes}분 {rest}초"
+        return f" · 지속 {rest}초"
+
+    def add_event(self, record: StatusChange) -> None:
+        """Display only committed observations; bounded list avoids UI memory growth."""
+        self._event_records.appendleft(record)
+        self._refresh_event_list()
+
+    def _refresh_event_list(self, *_args) -> None:
+        query = self.event_search.text().casefold().strip()
+        event_type = self.event_type_filter.currentData()
+        window_seconds = int(self.event_period_filter.currentData() or 0)
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+        visible: list[str] = []
+        for record in self._event_records:
+            if event_type and self._event_type(record) != event_type:
+                continue
+            when = format_local_time(record.observed_at)
+            label = (
+                f"{when} · {record.alias or record.address} ({record.address}) "
+                f"· {record.description}{self._duration_text(record.duration_seconds)}"
+            )
+            if query and query not in label.casefold():
+                continue
+            if window_seconds:
+                try:
+                    recorded = datetime.fromisoformat(record.observed_at)
+                    if recorded.tzinfo is None:
+                        recorded = recorded.replace(tzinfo=timezone.utc)
+                    if recorded < cutoff:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+            visible.append(label)
+        self.events.clear()
+        self.events.addItems(visible)
+        self.event_count.setText(f"{len(visible)}/{len(self._event_records)}건")
