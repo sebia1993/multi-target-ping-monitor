@@ -18,6 +18,7 @@ class StatusChange:
     previous: str
     current: str
     description: str
+    duration_seconds: int | None = None
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -32,9 +33,16 @@ def _connect(path: Path) -> sqlite3.Connection:
           alias TEXT NOT NULL,
           previous TEXT NOT NULL,
           current TEXT NOT NULL,
-          description TEXT NOT NULL
+          description TEXT NOT NULL,
+          duration_seconds INTEGER
         )
     """)
+    # Existing databases predate duration_seconds: migrate without dropping any rows.
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(fusion_status_changes)")}
+    if "duration_seconds" not in columns:
+        conn.execute("ALTER TABLE fusion_status_changes ADD COLUMN duration_seconds INTEGER")
+    conn.execute("CREATE INDEX IF NOT EXISTS fusion_status_time_idx ON fusion_status_changes (observed_at)")
+    conn.commit()
     return conn
 
 
@@ -46,7 +54,7 @@ def recent_changes(path: Path, limit: int = 200) -> list[StatusChange]:
         db = _connect(path)
         try:
             rows = db.execute(
-                "SELECT observed_at,address,alias,previous,current,description "
+                "SELECT observed_at,address,alias,previous,current,description,duration_seconds "
                 "FROM fusion_status_changes ORDER BY id DESC LIMIT ?",
                 (max(0, min(limit, 2000)),),
             ).fetchall()
@@ -111,10 +119,10 @@ class StatusEventWriter(QThread):
                 try:
                     connection.execute(
                         "INSERT INTO fusion_status_changes "
-                        "(observed_at,address,alias,previous,current,description) "
-                        "VALUES (?,?,?,?,?,?)",
+                        "(observed_at,address,alias,previous,current,description,duration_seconds) "
+                        "VALUES (?,?,?,?,?,?,?)",
                         (item.observed_at, item.address, item.alias,
-                         item.previous, item.current, item.description),
+                         item.previous, item.current, item.description, item.duration_seconds),
                     )
                     connection.commit()
                     self.persisted.emit(item)
