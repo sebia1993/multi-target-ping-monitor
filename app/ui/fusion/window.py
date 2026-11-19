@@ -98,7 +98,7 @@ class FusionMainWindow(ReportMainWindow):
         if dashboard is None:
             return
         active = getattr(self, "_fusion_mode", "classic") == "fusion"
-        self.graph_panel.setVisible(not active and self.graph_panel.isVisible())
+        self.graph_panel.setVisible(not active and not self.graph_panel.isHidden())
         dashboard.setVisible(active)
 
     def _set_running(self, running: bool) -> None:
