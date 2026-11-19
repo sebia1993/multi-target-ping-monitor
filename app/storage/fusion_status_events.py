@@ -79,7 +79,7 @@ class StatusEventWriter(QThread):
         self._closing = False
 
     def submit(self, event: StatusChange) -> bool:
-        if self._closing or not self.isRunning():
+        if self._closing or self.isFinished():
             self.failed.emit("Fusion 이벤트 기록 스레드가 중지되어 저장할 수 없습니다.")
             return False
         try:
