@@ -1,7 +1,7 @@
 """Native, read-only Fusion dashboard for the existing MultiPingCheck measuring engine."""
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtCore import QEvent, QPointF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QComboBox,
@@ -73,7 +73,7 @@ class Sparkline(QWidget):
             x = left + index * width / (len(self.points) - 1)
             y = top + height * (1.0 - min(value / ceiling, 1.0))
             if previous is not None:
-                painter.drawLine(previous[0], previous[1], x, y)
+                painter.drawLine(QPointF(*previous), QPointF(x, y))
             previous = (x, y)
 
 
@@ -174,6 +174,7 @@ class FusionDashboard(QWidget):
         self.groups: dict[str, list[str]] = {}
         self.running = False
         self._last_grid_addresses: tuple[str, ...] = ()
+        self._laid_out_addresses: tuple[str, ...] = ()
         self._last_columns = 0
         self.theme = "dark"
         self.mode = "cards"
@@ -286,7 +287,7 @@ class FusionDashboard(QWidget):
         self._apply_theme()
 
     def eventFilter(self, source, event) -> bool:
-        if source == self.grid_scroll.viewport() and event.type() == QEvent.Type.Resize:
+        if hasattr(self, "grid_scroll") and source == self.grid_scroll.viewport() and event.type() == QEvent.Type.Resize:
             self._reflow()
         return super().eventFilter(source, event)
 
@@ -423,11 +424,14 @@ class FusionDashboard(QWidget):
             return
         width = max(self.grid_scroll.viewport().width(), 260)
         columns = max(1, min(4, width // 290))
-        if columns == self._last_columns and self.grid.count() == len(self._last_grid_addresses):
+        if columns == self._last_columns and self._laid_out_addresses == self._last_grid_addresses:
             return
         self._last_columns = columns
+        self._laid_out_addresses = self._last_grid_addresses
         while self.grid.count():
-            self.grid.takeAt(0)
+            item = self.grid.takeAt(0)
+            if item.widget() is not None:
+                item.widget().hide()
         for index, address in enumerate(self._last_grid_addresses):
             card = self.cards.get(address)
             if card is not None:
