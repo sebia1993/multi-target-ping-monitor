@@ -10,12 +10,13 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QWidget,
 )
 
 from app.reporting.data import TargetInfo
-from app.storage.fusion_favorites import FavoriteState, FavoritesStore
+from app.storage.fusion_favorites import FavoriteState, FavoritesStore, renamed_group, updated_membership
 from app.storage.fusion_status_events import (
     StatusChange,
     StatusEventWriter,
@@ -56,6 +57,7 @@ class FusionMainWindow(ReportMainWindow):
         self.fusion_dashboard.group_requested.connect(self._fusion_assign_to_group)
         self.fusion_dashboard.new_group_requested.connect(self._fusion_create_group)
         self.fusion_dashboard.remove_group_requested.connect(self._fusion_remove_group)
+        self.fusion_dashboard.rename_group_requested.connect(self._fusion_rename_group)
         self.fusion_dashboard.load_group_requested.connect(self._fusion_load_group)
 
         toolbar = QWidget(self)
@@ -195,14 +197,27 @@ class FusionMainWindow(ReportMainWindow):
         super().edit_target_alias(address)
         changed = self.target_aliases.get(address, "")
         if changed != original:
+            updated = FavoriteState(
+                groups={key: list(values) for key, values in self.favorites.groups.items()},
+                aliases=dict(self.favorites.aliases),
+            )
             if changed:
-                self.favorites.aliases[address] = changed
+                updated.aliases[address] = changed
             else:
-                self.favorites.aliases.pop(address, None)
-            self._save_fusion_favorites()
+                updated.aliases.pop(address, None)
+            if not self._save_fusion_favorites(updated):
+                # Never pretend a failed disk write preserved the edited alias.
+                if original:
+                    self.target_aliases[address] = original
+                else:
+                    self.target_aliases.pop(address, None)
+                self._sync_target_graph_alias_label(address)
+                self.status_label.setText(f"{address} 별칭 저장에 실패하여 이전 값으로 되돌렸습니다.")
         self._sync_fusion_targets()
 
-    def _save_fusion_favorites(self) -> bool:
+    def _save_fusion_favorites(
+        self, candidate: FavoriteState | None = None, *, select_group: str | None = None
+    ) -> bool:
         if self._fusion_favorites_readonly:
             QMessageBox.warning(
                 self, "손상된 즐겨찾기 파일 보호",
@@ -210,12 +225,16 @@ class FusionMainWindow(ReportMainWindow):
                 "원본 덮어쓰기를 막았습니다. 먼저 파일을 복구하거나 백업 후 다시 실행하세요.",
             )
             return False
+        next_state = candidate if candidate is not None else self.favorites
         try:
-            self.favorites_store.save(self.favorites)
+            self.favorites_store.save(next_state)
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "즐겨찾기 저장 실패", f"기존 파일은 보존되었습니다.\n{exc}")
             return False
+        self.favorites = next_state
         self.fusion_dashboard.set_groups(self.favorites.groups)
+        if select_group is not None:
+            self.fusion_dashboard.select_group(select_group)
         return True
 
     def _fusion_create_group(self) -> None:
@@ -226,9 +245,26 @@ class FusionMainWindow(ReportMainWindow):
         if name in self.favorites.groups:
             QMessageBox.information(self, "중복 그룹", "이미 같은 이름의 그룹이 있습니다.")
             return
-        self.favorites.groups[name] = []
-        if not self._save_fusion_favorites():
-            self.favorites.groups.pop(name, None)
+        candidate = FavoriteState(
+            groups={**self.favorites.groups, name: []},
+            aliases=dict(self.favorites.aliases),
+        )
+        self._save_fusion_favorites(candidate, select_group=name)
+
+    def _fusion_rename_group(self, name: str) -> None:
+        if name not in self.favorites.groups:
+            return
+        new_name, accepted = QInputDialog.getText(
+            self, "그룹 이름 변경", "새 그룹 이름", QLineEdit.EchoMode.Normal, name
+        )
+        if not accepted or new_name.strip() == name:
+            return
+        try:
+            candidate = renamed_group(self.favorites, name, new_name)
+        except ValueError as exc:
+            QMessageBox.warning(self, "이름 변경 불가", str(exc))
+            return
+        self._save_fusion_favorites(candidate, select_group=new_name.strip())
 
     def _fusion_remove_group(self, name: str) -> None:
         if name not in self.favorites.groups:
@@ -238,30 +274,48 @@ class FusionMainWindow(ReportMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
-        if choice == QMessageBox.StandardButton.Yes:
-            addresses = self.favorites.groups.pop(name)
-            if not self._save_fusion_favorites():
-                self.favorites.groups[name] = addresses
+        if choice != QMessageBox.StandardButton.Yes:
+            return
+        candidate = FavoriteState(
+            groups={key: list(values) for key, values in self.favorites.groups.items() if key != name},
+            aliases=dict(self.favorites.aliases),
+        )
+        self._save_fusion_favorites(candidate)
 
     def _fusion_assign_to_group(self, address: str) -> None:
         if not self.favorites.groups:
             QMessageBox.information(self, "그룹 필요", "먼저 그룹을 생성하세요.")
             return
-        groups = list(self.favorites.groups)
-        name, accepted = QInputDialog.getItem(
-            self, "IP를 그룹에 저장", f"{address} 대상을 저장할 그룹", groups, 0, False
+        members = {name for name, values in self.favorites.groups.items() if address in values}
+        options: list[tuple[str, str, str]] = []
+        for name in self.favorites.groups:
+            if name not in members:
+                options.append((f"추가: {name}", "add", name))
+            else:
+                options.append((f"해제: {name}", "remove", name))
+        if members:
+            options.extend(
+                (f"이동: {name} (기존 그룹 모두 해제)", "move", name)
+                for name in self.favorites.groups if name not in members
+            )
+        label, accepted = QInputDialog.getItem(
+            self, "IP 그룹 관리",
+            f"{address} 그룹 작업 선택\n이동은 이 IP의 기존 그룹 소속을 모두 해제합니다.",
+            [option[0] for option in options], 0, False
         )
-        if not accepted or not name:
+        if not accepted:
             return
-        targets = self.favorites.groups[name]
-        if address in targets:
+        selected = next(((op, group) for title, op, group in options if title == label), None)
+        if selected is None:
             return
-        if len(targets) >= 50:
-            QMessageBox.warning(self, "그룹 제한", "한 그룹에 최대 50개 IP를 저장할 수 있습니다.")
+        operation, group = selected
+        try:
+            candidate = updated_membership(self.favorites, address, group, operation)
+        except ValueError as exc:
+            QMessageBox.warning(self, "그룹 변경 불가", str(exc))
             return
-        targets.append(address)
-        if not self._save_fusion_favorites():
-            targets.pop()
+        if self._save_fusion_favorites(candidate):
+            self.status_label.setText(f"{address}: 그룹 '{group}' {operation} 작업을 저장했습니다.")
 
     def _fusion_load_group(self, name: str) -> None:
         if self._is_worker_running():
