@@ -1,4 +1,4 @@
-name: Fusion Qt 50 target acceptance
+name: Fusion Qt 50 target 600s acceptance
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
 jobs:
   fusion-ui50-smoke:
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       QT_QPA_PLATFORM: offscreen
     steps:
@@ -26,10 +26,10 @@ jobs:
           python-version: '3.12'
       - name: Install audited hash-pinned dependencies
         run: python -m pip install --require-hashes -r requirements-dev.lock
-      - name: Run actual Fusion Qt UI50 simulated 30s acceptance
+      - name: Run actual Fusion Qt UI50 simulated 600s acceptance
         shell: pwsh
         run: |
-          python scripts/soak_test.py --profile ui50 --ui-implementation fusion --duration-seconds 30 --output-dir artifacts/fusion-ui50
+          python scripts/soak_test.py --profile ui50 --ui-implementation fusion --duration-seconds 600 --output-dir artifacts/fusion-ui50
           if ($LASTEXITCODE -ne 0) { throw "Fusion UI50 failed 0.2s event/process limits" }
       - name: Retain synthetic evidence
         if: always()
