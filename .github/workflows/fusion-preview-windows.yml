@@ -1,0 +1,94 @@
+name: Fusion PR25 Windows preview
+
+on:
+  push:
+    branches: [feature/fusion-dashboard-v0.4]
+    paths:
+      - '.github/workflows/fusion-preview-windows.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    name: Verified unmerged Windows test ZIP
+    runs-on: windows-2022
+    timeout-minutes: 75
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - name: Check out exact branch commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install audited SHA-256-locked dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --require-hashes -r requirements-dev.lock
+          if ($LASTEXITCODE -ne 0) { throw 'dependency install failed' }
+      - name: Validate source and package EXE without creating release
+        shell: pwsh
+        run: |
+          python scripts/verify_release.py
+          if ($LASTEXITCODE -ne 0) { throw 'source verifier failed' }
+          .\build_windows_exe.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Windows EXE build failed' }
+          python scripts/verify_release.py --exe
+          if ($LASTEXITCODE -ne 0) { throw 'packaged EXE smoke failed' }
+      - name: Verify packaged HTML and PDF report export
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: windows
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $output = Join-Path $PWD 'artifacts\fusion-preview-report-smoke'
+          $exe = Join-Path $PWD 'dist\MultiPingCheck\MultiPingCheck.exe'
+          $quotedOutput = '"' + $output + '"'
+          $proc = Start-Process -FilePath $exe -ArgumentList @('--report-smoke-dir', $quotedOutput) -PassThru
+          if (-not $proc.WaitForExit(120000)) {
+            $proc.Kill()
+            throw 'Packaged report generation timed out'
+          }
+          if ($proc.ExitCode -ne 0) { throw "Report export smoke failed ($($proc.ExitCode))" }
+          $m = Get-Content (Join-Path $output 'report-smoke-manifest.json') -Raw | ConvertFrom-Json
+          if (-not $m.packaged -or -not $m.synthetic_only -or $m.network_probes_sent -ne 0) {
+            throw 'Report smoke evidence invalid'
+          }
+      - name: Pack portable development ZIP and SHA-256
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = Join-Path $PWD 'artifacts\fusion-preview-package'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item 'dist\MultiPingCheck\*' -Destination $stage -Recurse -Force
+          $notes = @(
+            'MultiPingCheck Fusion PR #25 - Windows 11 Test Preview',
+            'Development ZIP, not a formal GitHub Release. main is unchanged.',
+            'Verify SHA-256, extract the inner ZIP fully, keep _internal next to MultiPingCheck.exe.',
+            'Close any existing MultiPingCheck before launching this preview.',
+            'Test only IPs you are authorized to probe; first try 2-3 noncritical targets.',
+            'Check Fusion cards, groups, classic view, history, HTML/PDF reports, stop/restart.',
+            'Do not share corporate IP addresses, credentials or logs in public GitHub.',
+            'No code signing or production compatibility guarantee.'
+          )
+          $notes | Set-Content -Path (Join-Path $stage 'README_PREVIEW_KO.txt') -Encoding utf8
+          $suffix = $env:GITHUB_SHA.Substring(0,8)
+          $zip = Join-Path $PWD "artifacts\MultiPingCheck_Fusion_PR25_$($suffix)_Win11_x64.zip"
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -CompressionLevel Optimal -Force
+          if (-not (Test-Path $zip)) { throw 'Preview ZIP missing' }
+          $digest = (Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$digest  $(Split-Path $zip -Leaf)" | Set-Content "$zip.sha256" -Encoding ascii
+          Write-Host "Preview SHA-256 $digest"
+      - name: Upload short-lived development preview, never publish Release
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Fusion-PR25-preview-${{ github.sha }}
+          path: |
+            artifacts/MultiPingCheck_Fusion_PR25_*_Win11_x64.zip
+            artifacts/MultiPingCheck_Fusion_PR25_*_Win11_x64.zip.sha256
+          retention-days: 1
+          if-no-files-found: error

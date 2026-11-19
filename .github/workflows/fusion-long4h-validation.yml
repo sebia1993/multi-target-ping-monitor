@@ -1,0 +1,42 @@
+name: Fusion unchanged worker long4h evidence
+
+on:
+  push:
+    branches: [feature/fusion-dashboard-v0.4]
+    paths:
+      - '.github/workflows/fusion-long4h-validation.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  existing-worker-long4h:
+    name: Existing measurement worker 4h fixed evidence
+    runs-on: windows-2022
+    timeout-minutes: 300
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install hash-pinned runtime/development dependencies
+        run: python -m pip install --require-hashes -r requirements-dev.lock
+      - name: Run unshortened long4h simulated measurement evidence
+        shell: pwsh
+        run: |
+          python scripts/soak_test.py --profile long4h --output-dir artifacts/fusion-long4h
+          if ($LASTEXITCODE -ne 0) { throw 'Existing worker fixed-duration long4h failed strict stability gates' }
+      - name: Archive compact synthetic evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fusion-worker-long4h-${{ github.run_id }}
+          path: artifacts/fusion-long4h/*.json
+          if-no-files-found: ignore
+          retention-days: 1

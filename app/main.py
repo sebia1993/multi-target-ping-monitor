@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from app.ui.report_window import ReportMainWindow as MainWindow
+from app.ui.fusion.window import FusionMainWindow as MainWindow
 from app.utils.instance_lock import (
     APP_ALREADY_RUNNING_CODE,
     InstanceLockError,
