@@ -287,7 +287,7 @@ class FusionDashboard(QWidget):
         self._apply_theme()
 
     def eventFilter(self, source, event) -> bool:
-        if hasattr(self, "grid_scroll") and source == self.grid_scroll.viewport() and event.type() == QEvent.Type.Resize:
+        if hasattr(self, "grid") and source == self.grid_scroll.viewport() and event.type() == QEvent.Type.Resize:
             self._reflow()
         return super().eventFilter(source, event)
 
