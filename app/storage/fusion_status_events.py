@@ -42,12 +42,18 @@ def recent_changes(path: Path, limit: int = 200) -> list[StatusChange]:
     """Read only when presenting history; corrupt DBs raise instead of appearing empty."""
     if not path.exists():
         return []
-    with _connect(path) as db:
-        rows = db.execute(
-            "SELECT observed_at,address,alias,previous,current,description "
-            "FROM fusion_status_changes ORDER BY id DESC LIMIT ?",
-            (max(0, min(limit, 2000)),),
-        ).fetchall()
+    try:
+        db = _connect(path)
+        try:
+            rows = db.execute(
+                "SELECT observed_at,address,alias,previous,current,description "
+                "FROM fusion_status_changes ORDER BY id DESC LIMIT ?",
+                (max(0, min(limit, 2000)),),
+            ).fetchall()
+        finally:
+            db.close()
+    except sqlite3.Error as exc:
+        raise ValueError(f"상태 이력 DB 손상/잠금: {exc}; 원본은 보존됩니다.") from exc
     return [StatusChange(*row) for row in rows]
 
 
@@ -73,7 +79,8 @@ class StatusEventWriter(QThread):
         self._closing = False
 
     def submit(self, event: StatusChange) -> bool:
-        if self._closing:
+        if self._closing or not self.isRunning():
+            self.failed.emit("Fusion 이벤트 기록 스레드가 중지되어 저장할 수 없습니다.")
             return False
         try:
             self._pending.put_nowait(event)
