@@ -33,11 +33,13 @@ class FusionMainWindow(ReportMainWindow):
     def __init__(self, worker_factory=None) -> None:
         super().__init__(worker_factory=worker_factory)
         self.favorites_store = FavoritesStore(app_data_directory() / "fusion_favorites.json")
+        self._fusion_favorites_readonly = False
         try:
             self.favorites: FavoriteState = self.favorites_store.load()
         except (OSError, ValueError) as exc:
             self.favorites = FavoriteState()
-            self.status_label.setText(f"즐겨찾기 읽기 실패, 원본 보존: {exc}")
+            self._fusion_favorites_readonly = True
+            self.status_label.setText(f"즐겨찾기 읽기 실패, 쓰기 잠금: {exc}")
         self.target_aliases.update(self.favorites.aliases)
         self._fusion_last_states: dict[str, str] = {}
         self._fusion_mode = "fusion"
@@ -201,6 +203,13 @@ class FusionMainWindow(ReportMainWindow):
         self._sync_fusion_targets()
 
     def _save_fusion_favorites(self) -> bool:
+        if self._fusion_favorites_readonly:
+            QMessageBox.warning(
+                self, "손상된 즐겨찾기 파일 보호",
+                "기존 즐겨찾기 파일이 손상되었거나 읽을 수 없습니다.\n"
+                "원본 덮어쓰기를 막았습니다. 먼저 파일을 복구하거나 백업 후 다시 실행하세요.",
+            )
+            return False
         try:
             self.favorites_store.save(self.favorites)
         except (OSError, ValueError) as exc:
